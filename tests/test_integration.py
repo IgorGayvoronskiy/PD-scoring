@@ -49,16 +49,16 @@ def test_422_is_logged(client, good_row):
 
 
 def test_batch_prediction_is_logged(client, good_row):
-    good_rows = [good_row, {**good_row, "device": 'Desktop'}]
+    good_rows = [good_row, {**good_row, "home_ownership_n": 'OWN'}]
     body = client.post("/v1/predict/batch", json={"rows": good_rows}).json()
 
     requests_id = [resp_row['request_id'] for resp_row in body]
 
     with psycopg.connect(DATABASE_URL) as conn:
         db_rows = conn.execute(
-            "SELECT request_id, features->>'device', score, response_code "
+            "SELECT request_id, features->>'home_ownership_n', score, response_code "
             "FROM predictions WHERE request_id = ANY(%s) "
-            "ORDER BY features->>'device'",
+            "ORDER BY features->>'home_ownership_n'",
             (requests_id,),
         ).fetchall()
 
@@ -68,18 +68,18 @@ def test_batch_prediction_is_logged(client, good_row):
     by_id = {resp_row["request_id"]: resp_row for resp_row in body}
     assert all(str(db_row[0]) in by_id for db_row in db_rows)
 
-    assert [db_row[1] for db_row in db_rows] == sorted(row["device"] for row in good_rows)
+    assert [db_row[1] for db_row in db_rows] == sorted(row["home_ownership_n"] for row in good_rows)
     assert all(db_row[3] == 200 for db_row in db_rows)
     for db_row, resp_row in zip(
-        sorted(db_rows, key=lambda r: r[2]),
-        sorted(body, key=lambda r: r["score"]),
+        sorted(db_rows, key=lambda r: r[0]),
+        sorted(body, key=lambda r: r["request_id"]),
         strict=True
     ):
         assert db_row[2] == pytest.approx(resp_row["score"])
 
 
 def test_bad_row_in_batch_is_logged_once(client, good_row):
-    bad_rows = [good_row, {**good_row, "age": -1}]
+    bad_rows = [good_row, {**good_row, "loan_amnt": -1}]
     resp = client.post("/v1/predict/batch", json={"rows": bad_rows})
     body = resp.json()
 

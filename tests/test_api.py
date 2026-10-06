@@ -34,6 +34,9 @@ def test_zero_loan_amount_is_422(client, good_row):
     )
     assert r.status_code == 422
 
+def test_id_zero_is_422(client, good_row):
+    r = client.post("/v1/predict", json={**good_row, "id": 0})
+    assert r.status_code == 422
 
 def test_zero_revenue_is_valid(client, good_row):
     r = client.post(
@@ -59,9 +62,36 @@ def test_experience_zero_is_valid(client, good_row):
     assert r.status_code == 200
 
 
+def test_predict_response(client, good_row):
+    r = client.post("/v1/predict", json=good_row)
+
+    assert r.status_code == 200
+
+    data = r.json()
+
+    assert isinstance(data["request_id"], str)
+    assert isinstance(data["score"], float)
+    assert isinstance(data["threshold"], float)
+    assert isinstance(data["default"], bool)
+    assert data["decision"] in {"APPROVE", "REJECT"}
+    assert isinstance(data["explanations"], list)
+    assert len(data["explanations"]) <= 5
+    assert isinstance(data["model_version"], str)
+    assert isinstance(data["latency_ms"], float)
+
+    if data["explanations"]:
+        explanation = data["explanations"][0]
+
+        assert "feature" in explanation
+        assert "value" in explanation
+        assert "impact" in explanation
+        assert "direction" in explanation
+
+
 @pytest.mark.parametrize(
     "field",
     [
+        "id",
         "revenue",
         "dti_n",
         "loan_amnt",

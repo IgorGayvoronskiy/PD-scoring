@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+    <title>PD Scoring</title>
+
+    <link
+        rel="stylesheet"
+        href="/static/style.css"
+    >
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>PD Scoring</h1>
+
+    <div class="tabs">
+        <button
+            class="tab active"
+            data-tab="single"
+        >
+            Single scoring
+        </button>
+
+        <button
+            class="tab"
+            data-tab="batch"
+        >
+            Batch scoring
+        </button>
+    </div>
+
+
+    <!-- SINGLE -->
+
+    <section
+        id="single"
+        class="tab-content active"
+    >
+
+        <form id="single-form">
+
+            <div
+                id="features-container"
+                class="form-grid"
+            ></div>
+
+            <button
+                type="submit"
+                class="primary-button"
+            >
+                Predict
+            </button>
+
+        </form>
+
+
+        <div
+            id="single-error"
+            class="error hidden"
+        ></div>
+
+
+        <section
+            id="single-result"
+            class="result hidden"
+        >
+
+            <h2>Prediction result</h2>
+
+            <div class="result-grid">
+
+                <div class="metric">
+                    <span>
+                        P(default)
+                    </span>
+
+                    <strong id="result-score">
+                        -
+                    </strong>
+                </div>
+
+                <div class="metric">
+                    <span>
+                        Cut-off
+                    </span>
+
+                    <strong id="result-threshold">
+                        -
+                    </strong>
+                </div>
+
+                <div class="metric">
+                    <span>
+                        Class
+                    </span>
+
+                    <strong id="result-class">
+                        -
+                    </strong>
+                </div>
+
+                <div class="metric">
+                    <span>
+                        Decision
+                    </span>
+
+                    <strong id="result-decision">
+                        -
+                    </strong>
+                </div>
+
+            </div>
+
+
+            <div class="reasons">
+
+                <h3>Main reasons</h3>
+
+                <p class="legend">
+                    Positive (+) impact increases
+                    P(default).
+                    Negative (-) impact decreases
+                    P(default).
+                </p>
+
+                <table>
+
+                    <thead>
+                    <tr>
+                        <th>Feature</th>
+                        <th>Value</th>
+                        <th>Impact</th>
+                        <th>Effect</th>
+                    </tr>
+                    </thead>
+
+                    <tbody
+                        id="reasons-body"
+                    ></tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+    </section>
+
+
+    <!-- BATCH -->
+
+    <section
+        id="batch"
+        class="tab-content"
+    >
+
+        <form id="batch-form">
+
+            <div class="upload-box">
+
+                <label for="csv-file">
+                    CSV file
+                </label>
+
+                <input
+                    id="csv-file"
+                    type="file"
+                    accept=".csv"
+                    required
+                >
+
+            </div>
+
+            <button
+                type="submit"
+                class="primary-button"
+            >
+                Run batch scoring
+            </button>
+
+        </form>
+
+
+        <div
+            id="batch-error"
+            class="error hidden"
+        ></div>
+
+
+        <section
+            id="batch-result"
+            class="result hidden"
+        >
+
+            <h2>Batch results</h2>
+
+            <div class="result-grid">
+
+                <div class="metric">
+                    <span>
+                        Applications
+                    </span>
+
+                    <strong id="batch-total">
+                        -
+                    </strong>
+                </div>
+
+                <div class="metric">
+                    <span>
+                        Approved
+                    </span>
+
+                    <strong id="batch-approved">
+                        -
+                    </strong>
+                </div>
+
+                <div class="metric">
+                    <span>
+                        Rejected
+                    </span>
+
+                    <strong id="batch-rejected">
+                        -
+                    </strong>
+                </div>
+
+            </div>
+
+
+            <div class="download-box">
+
+                <a
+                    id="download-link"
+                    class="primary-button"
+                    href="#"
+                    download
+                >
+                    Download results CSV
+                </a>
+
+            </div>
+
+
+            <h3>First 10 applications</h3>
+
+            <div class="table-wrapper">
+
+                <table>
+
+                    <thead>
+                    <tr>
+                        <th>Features</th>
+                        <th>P(default)</th>
+                        <th>Class</th>
+                        <th>Decision</th>
+                        <th>Main reasons</th>
+                    </tr>
+                    </thead>
+
+                    <tbody
+                        id="batch-body"
+                    ></tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+    </section>
+
+</div>
+
+
+<script src="/static/app.js"></script>
+
+</body>
+</html>

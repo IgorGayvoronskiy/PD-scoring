@@ -12,7 +12,9 @@ def client():
 
 @pytest.fixture()
 def good_row():
-    return {"revenue": 40000.0,
+    return {
+            "id": 96493566,
+            "revenue": 40000.0,
             "dti_n": 21.66,
             "loan_amnt": 8800,
             "fico_n": 667.0,
