@@ -212,3 +212,65 @@ td {
         grid-template-columns: 1fr;
     }
 }
+
+.loader {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 20px;
+    color: #666;
+    font-size: 14px;
+}
+
+.spinner {
+    width: 22px;
+    height: 22px;
+    border: 3px solid #d0d4da;
+    border-top-color: #222;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.primary-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.field label {
+    position: relative;
+    width: fit-content;
+    cursor: help;
+    border-bottom: 1px dotted #888;
+}
+
+.field label::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    width: 300px;
+    max-width: 80vw;
+    padding: 10px 12px;
+    background: #222;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.4;
+    border-radius: 8px;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s;
+    pointer-events: none;
+    z-index: 10;
+}
+
+.field label:hover::after {
+    opacity: 1;
+    visibility: visible;
+}

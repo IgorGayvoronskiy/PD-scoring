@@ -23,62 +23,82 @@ tabs.forEach((tab) => {
 
 const featureDefinitions = [
     {
-        name: "id",
-        type: "number",
-        min: 1,
-        step: 1
+        name: "issue_d",
+        type: "month",
+        description:
+            "Месяц и год, в которых кредит был одобрен."
     },
     {
         name: "revenue",
         type: "number",
         min: 0,
-        step: "any"
+        step: "any",
+        description:
+            "Годовой доход, который заёмщик указал о себе при регистрации."
     },
     {
         name: "dti_n",
         type: "number",
         min: 0,
-        step: "any"
+        step: "any",
+        description:
+            "Коэффициент долговой нагрузки без учёта ипотеки (месячные данные), рассчитанный по всей группе заявителей: общие платежи созаёмщиков по долговым обязательствам, делённые на их совокупный месячный доход."
     },
     {
         name: "loan_amnt",
         type: "number",
-        min: 0,
-        step: "any"
+        min: 0.01,
+        step: "any",
+        description:
+            "Сумма кредита, запрошенная заёмщиком (должна быть больше 0)."
     },
     {
         name: "fico_n",
         type: "number",
         min: 300,
         max: 850,
-        step: "any"
+        step: "any",
+        description:
+            "Кредитный рейтинг FICO (от 300 до 850) на момент подачи заявки, мера риска по кредитной истории. Рассчитан как среднее fico_range_low и fico_range_high из исходных данных."
     },
     {
         name: "experience_c",
         type: "number",
         min: 0,
         max: 1,
-        step: 1
+        step: 1,
+        description:
+            "Бинарный признак: 1 — заёмщик новый для организации (LC), 0 — нет. Определяется по датам предыдущего и текущего кредита в LC: если разница положительна, опыт сотрудничества с LC не считается новым."
     },
     {
         name: "emp_length",
-        type: "text"
+        type: "text",
+        description:
+            "Стаж работы заёмщика (категория; есть категория «нет информации»)."
     },
     {
         name: "purpose",
-        type: "text"
+        type: "text",
+        description:
+            "Категория цели кредита в заявке."
     },
     {
         name: "home_ownership_n",
-        type: "text"
+        type: "text",
+        description:
+            "Статус владения жильём, указанный при регистрации: mortgage, rent, own или other (категории other, any и none объединены в other)."
     },
     {
         name: "addr_state",
-        type: "text"
+        type: "text",
+        description:
+            "Штат США, в котором проживает заёмщик."
     },
     {
         name: "zip_code",
-        type: "text"
+        type: "text",
+        description:
+            "Почтовый индекс места проживания заёмщика."
     }
 ];
 
@@ -98,6 +118,7 @@ function createFeatureForm() {
         const label = document.createElement("label");
         label.textContent = feature.name;
         label.htmlFor = `feature-${feature.name}`;
+        label.dataset.tooltip = feature.description;
 
         const input = document.createElement("input");
 
@@ -137,11 +158,9 @@ function getFormData() {
             `feature-${feature.name}`
         );
 
-        let value = input.value;
+        let value = input.value.trim();
 
-        if (
-            feature.type === "number"
-        ) {
+        if (feature.type === "number") {
             value = Number(value);
         }
 
@@ -166,6 +185,16 @@ function hideError(elementId) {
     document
         .getElementById(elementId)
         .classList.add("hidden");
+}
+
+function setLoading(prefix, isLoading) {
+    document
+        .getElementById(`${prefix}-loader`)
+        .classList.toggle("hidden", !isLoading);
+
+    document.getElementById(
+        `${prefix}-submit`
+    ).disabled = isLoading;
 }
 
 
@@ -235,6 +264,9 @@ document
                 "single-result"
             );
 
+        resultBlock.classList.add("hidden");
+        setLoading("single", true);
+
         try {
             const response = await fetch(
                 "/v1/predict",
@@ -276,7 +308,7 @@ document
             document.getElementById(
                 "result-class"
             ).textContent =
-                data.class;
+                data.default ? "DEFAULT" : "NO DEFAULT";
 
             document.getElementById(
                 "result-decision"
@@ -296,6 +328,8 @@ document
                 "single-error",
                 error.message
             );
+        } finally {
+            setLoading("single", false);
         }
     });
 
@@ -328,6 +362,12 @@ document
             "file",
             fileInput.files[0]
         );
+
+        document
+            .getElementById("batch-result")
+            .classList.add("hidden");
+
+        setLoading("batch", true);
 
         try {
             const response = await fetch(
@@ -404,8 +444,7 @@ document
                 const classCell =
                     document.createElement("td");
 
-                classCell.textContent =
-                    item.class;
+                classCell.textContent = item.class;
 
                 const decision =
                     document.createElement("td");
@@ -416,8 +455,7 @@ document
                 const reasons =
                     document.createElement("td");
 
-                reasons.textContent =
-                    item.main_reasons;
+                reasons.textContent = item["main reasons"];
 
                 row.appendChild(features);
                 row.appendChild(score);
@@ -439,5 +477,7 @@ document
                 "batch-error",
                 error.message
             );
+        } finally {
+            setLoading("batch", false);
         }
     });

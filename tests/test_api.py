@@ -34,10 +34,6 @@ def test_zero_loan_amount_is_422(client, good_row):
     )
     assert r.status_code == 422
 
-def test_id_zero_is_422(client, good_row):
-    r = client.post("/v1/predict", json={**good_row, "id": 0})
-    assert r.status_code == 422
-
 def test_zero_revenue_is_valid(client, good_row):
     r = client.post(
         "/v1/predict",
@@ -91,7 +87,7 @@ def test_predict_response(client, good_row):
 @pytest.mark.parametrize(
     "field",
     [
-        "id",
+        "issue_d",
         "revenue",
         "dti_n",
         "loan_amnt",

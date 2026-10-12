@@ -50,15 +50,21 @@
                 id="features-container"
                 class="form-grid"
             ></div>
-
+            
             <button
                 type="submit"
                 class="primary-button"
+                id="single-submit"
             >
                 Predict
             </button>
 
         </form>
+
+        <div id="single-loader" class="loader hidden">
+            <div class="spinner"></div>
+            <span>Model is working...</span>
+        </div>
 
 
         <div
@@ -181,11 +187,17 @@
             <button
                 type="submit"
                 class="primary-button"
+                id="batch-submit"
             >
                 Run batch scoring
             </button>
 
         </form>
+
+        <div id="batch-loader" class="loader hidden">
+            <div class="spinner"></div>
+            <span>Model is working...</span>
+        </div>
 
 
         <div

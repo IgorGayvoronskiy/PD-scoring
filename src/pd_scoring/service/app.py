@@ -32,7 +32,7 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 class Features(BaseModel):
     model_config = {"extra": "forbid"}
 
-    id: int = Field(gt=0)
+    issue_d: str
     revenue: float = Field(ge=0)
     dti_n: float = Field(ge=0)
     loan_amnt: float = Field(gt=0)
