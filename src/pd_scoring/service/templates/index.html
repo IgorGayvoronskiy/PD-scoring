@@ -23,9 +23,9 @@
     <div class="tabs">
         <button
             class="tab active"
-            data-tab="single"
+            data-tab="applications"
         >
-            Single scoring
+            Applications
         </button>
 
         <button
@@ -34,122 +34,110 @@
         >
             Batch scoring
         </button>
+
+        <button
+            class="tab"
+            data-tab="predictions"
+        >
+            Predictions
+        </button>
     </div>
 
 
-    <!-- SINGLE -->
+    <!-- APPLICATIONS -->
 
     <section
-        id="single"
+        id="applications"
         class="tab-content active"
     >
 
-        <form id="single-form">
+        <form id="upload-form">
 
-            <div
-                id="features-container"
-                class="form-grid"
-            ></div>
-            
+            <div class="upload-box">
+
+                <label for="csv-file">
+                    CSV file with applications
+                </label>
+
+                <input
+                    id="csv-file"
+                    type="file"
+                    accept=".csv"
+                    required
+                >
+
+                <p class="hint">
+                    One row per application. Empty cells are saved as missing values.
+                </p>
+
+            </div>
+
             <button
                 type="submit"
                 class="primary-button"
-                id="single-submit"
+                id="upload-submit"
             >
-                Predict
+                Add to applications
             </button>
 
         </form>
 
-        <div id="single-loader" class="loader hidden">
+        <div id="upload-loader" class="loader hidden">
             <div class="spinner"></div>
-            <span>Model is working...</span>
+            <span>Adding applications...</span>
         </div>
 
 
         <div
-            id="single-error"
+            id="upload-error"
             class="error hidden"
         ></div>
 
+        <div
+            id="upload-success"
+            class="success hidden"
+        ></div>
 
-        <section
-            id="single-result"
-            class="result hidden"
-        >
 
-            <h2>Prediction result</h2>
+        <section class="result">
 
-            <div class="result-grid">
+            <div class="section-header">
 
-                <div class="metric">
-                    <span>
-                        P(default)
-                    </span>
+                <h2>
+                    Unscored applications
+                    <span
+                        id="unscored-count"
+                        class="badge"
+                    >0</span>
+                </h2>
 
-                    <strong id="result-score">
-                        -
-                    </strong>
-                </div>
-
-                <div class="metric">
-                    <span>
-                        Cut-off
-                    </span>
-
-                    <strong id="result-threshold">
-                        -
-                    </strong>
-                </div>
-
-                <div class="metric">
-                    <span>
-                        Class
-                    </span>
-
-                    <strong id="result-class">
-                        -
-                    </strong>
-                </div>
-
-                <div class="metric">
-                    <span>
-                        Decision
-                    </span>
-
-                    <strong id="result-decision">
-                        -
-                    </strong>
-                </div>
+                <button
+                    type="button"
+                    class="secondary-button"
+                    id="unscored-submit"
+                >
+                    Refresh
+                </button>
 
             </div>
 
+            <div id="unscored-loader" class="loader hidden">
+                <div class="spinner"></div>
+                <span>Loading applications...</span>
+            </div>
 
-            <div class="reasons">
+            <div
+                id="unscored-error"
+                class="error hidden"
+            ></div>
 
-                <h3>Main reasons</h3>
-
-                <p class="legend">
-                    Positive (+) impact increases
-                    P(default).
-                    Negative (-) impact decreases
-                    P(default).
-                </p>
+            <div class="table-scroll">
 
                 <table>
 
-                    <thead>
-                    <tr>
-                        <th>Feature</th>
-                        <th>Value</th>
-                        <th>Impact</th>
-                        <th>Effect</th>
-                    </tr>
-                    </thead>
+                    <thead id="unscored-head"></thead>
 
-                    <tbody
-                        id="reasons-body"
-                    ></tbody>
+                    <tbody id="unscored-body"></tbody>
 
                 </table>
 
@@ -169,20 +157,9 @@
 
         <form id="batch-form">
 
-            <div class="upload-box">
-
-                <label for="csv-file">
-                    CSV file
-                </label>
-
-                <input
-                    id="csv-file"
-                    type="file"
-                    accept=".csv"
-                    required
-                >
-
-            </div>
+            <p class="hint">
+                Scores all applications that have not been scored yet.
+            </p>
 
             <button
                 type="submit"
@@ -270,6 +247,7 @@
 
                     <thead>
                     <tr>
+                        <th>Application ID</th>
                         <th>Features</th>
                         <th>P(default)</th>
                         <th>Class</th>
@@ -281,6 +259,100 @@
                     <tbody
                         id="batch-body"
                     ></tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+    </section>
+
+
+    <!-- PREDICTIONS -->
+
+    <section
+        id="predictions"
+        class="tab-content"
+    >
+
+        <form id="pred-form">
+
+            <div class="filters">
+
+                <div class="filter">
+                    <label for="date-from">From</label>
+                    <input
+                        id="date-from"
+                        type="date"
+                    >
+                </div>
+
+                <div class="filter">
+                    <label for="date-to">To</label>
+                    <input
+                        id="date-to"
+                        type="date"
+                    >
+                </div>
+
+                <button
+                    type="submit"
+                    class="secondary-button"
+                    id="pred-submit"
+                >
+                    Show
+                </button>
+
+                <button
+                    type="button"
+                    class="primary-button"
+                    id="pred-download"
+                >
+                    Download CSV
+                </button>
+
+            </div>
+
+            <p class="hint">
+                Both dates are included. Leave a field empty for no limit.
+            </p>
+
+        </form>
+
+        <div id="pred-loader" class="loader hidden">
+            <div class="spinner"></div>
+            <span>Loading predictions...</span>
+        </div>
+
+
+        <div
+            id="pred-error"
+            class="error hidden"
+        ></div>
+
+
+        <section class="result">
+
+            <div class="section-header">
+
+                <h2>
+                    Predictions
+                    <span
+                        id="pred-count"
+                        class="badge"
+                    >0</span>
+                </h2>
+
+            </div>
+
+            <div class="table-scroll">
+
+                <table>
+
+                    <thead id="pred-head"></thead>
+
+                    <tbody id="pred-body"></tbody>
 
                 </table>
 

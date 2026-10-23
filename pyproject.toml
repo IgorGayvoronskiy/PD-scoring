@@ -1,6 +1,6 @@
 [project]
 name = "pd-scoring-service"
-version = "0.1.11"
+version = "0.2.3"
 description = "PD-scoring service"
 requires-python=">=3.11,<3.12"
 
@@ -15,7 +15,8 @@ dependencies = [
     "psycopg[binary]",
     "catboost",
     "shap",
-    "python-multipart"
+    "python-multipart",
+    "jinja2>=3.1.6",
 ]
 
 [dependency-groups]

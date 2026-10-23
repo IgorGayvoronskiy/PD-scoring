@@ -1,24 +1,37 @@
+import json
 import logging
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime
+from io import BytesIO
 from pathlib import Path
+from typing import Annotated
 
 import joblib
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    create_model,
+)
 
 from pd_scoring import db
 from pd_scoring.config import settings
 from pd_scoring.service.explain import (
     explain_prediction,
     explain_predictions,
+    get_base_estimator,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -28,27 +41,100 @@ UPLOADS_DIR = Path("uploads")
 
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
+logger = logging.getLogger(__name__)
 
-class Features(BaseModel):
-    model_config = {"extra": "forbid"}
+TOP_K = 5
+BATCH_LIMIT = 1000          # заявок за один запуск batch-скоринга
+UNSCORED_LIMIT = 1000       # строк в таблице необработанных заявок
+PREDICTIONS_LIMIT = 1000    # строк в таблице predictions (экспорт без лимита)
+MAX_UPLOAD_ROWS = 10_000
+MAX_REPORTED_ERRORS = 20
 
-    issue_d: str
-    revenue: float = Field(ge=0)
-    dti_n: float = Field(ge=0)
-    loan_amnt: float = Field(gt=0)
-    fico_n: float = Field(ge=300, le=850)
-    experience_c: int = Field(ge=0, le=1)
-    emp_length: str
-    purpose: str
-    home_ownership_n: str
-    addr_state: str
-    zip_code: str
+# Признаки с высокой кардинальностью: при обучении строки нормализовались
+# (пропуск -> "missing", обрезка пробелов, нижний регистр)
+HIGH_CARDINALITY = ["emp_title", "zip_code"]
+
+# Признаки для краткого описания заявки в таблице и CSV с результатами
+SUMMARY_COLUMNS = [
+    "loan_amnt", "term", "purpose", "annual_inc", "dti", "fico_range_low",
+]
 
 
-class BatchFeatures(BaseModel):
-    model_config = {"extra": "forbid"}
+# --------------------------------------------------------------------------- #
+# Схема заявки
+# --------------------------------------------------------------------------- #
 
-    rows: list[Features] = Field(min_length=1, max_length=1000)
+def _parse_date(value):
+    """Принимает date/datetime, 'YYYY-MM-DD', 'Aug-2003' и epoch в миллисекундах."""
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(value / 1000, tz=UTC).date()
+
+    if isinstance(value, str):
+        text = value.strip()
+
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            pass
+
+        try:
+            return datetime.strptime(text, "%b-%Y").date()
+        except ValueError:
+            pass
+
+    raise ValueError(
+        "expected a date: YYYY-MM-DD, Mon-YYYY or epoch milliseconds"
+    )
+
+
+# Ограничения значений (остальные числовые поля без ограничений)
+FIELD_CONSTRAINTS = {
+    "loan_amnt": {"gt": 0},
+    "annual_inc": {"ge": 0},
+    "dti": {"ge": 0},
+    "revol_util": {"ge": 0},
+    "fico_range_low": {"ge": 300, "le": 850},
+    "fico_range_high": {"ge": 300, "le": 850},
+}
+
+
+def _field_definitions() -> dict:
+    """Поля строятся из списков столбцов в db.py, чтобы схема API
+    и таблица applications не расходились."""
+    definitions = {}
+
+    for column in db.APPLICATION_COLUMNS:
+        if column in db.DATE_COLUMNS:
+            annotation = Annotated[date, BeforeValidator(_parse_date)]
+        elif column in db.TEXT_COLUMNS:
+            annotation = str
+        else:
+            annotation = float
+
+        constraints = FIELD_CONSTRAINTS.get(column, {})
+
+        if column in db.NULLABLE_COLUMNS:
+            definitions[column] = (
+                annotation | None,
+                Field(None, **constraints),
+            )
+        else:
+            definitions[column] = (annotation, Field(..., **constraints))
+
+    return definitions
+
+
+Features = create_model(
+    "Features",
+    __config__=ConfigDict(extra="forbid"),
+    **_field_definitions(),
+)
 
 
 class Explanation(BaseModel):
@@ -69,16 +155,6 @@ class Prediction(BaseModel):
     latency_ms: float
 
 
-class BatchPrediction(BaseModel):
-    request_id: str
-    features: dict
-    score: float
-    threshold: float
-    default: bool
-    decision: str
-    explanations: list[Explanation]
-
-
 class BatchResult(BaseModel):
     filename: str
     total: int
@@ -87,12 +163,21 @@ class BatchResult(BaseModel):
     preview: list[dict]
 
 
+class UploadResult(BaseModel):
+    added: int
+
+
+# --------------------------------------------------------------------------- #
+# Приложение
+# --------------------------------------------------------------------------- #
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     bundle = joblib.load(settings.model_path)
 
     app.state.model = bundle["model"]
-    app.state.shap_available_model = bundle["shap_available_model"]
+    # В артефакте одна калиброванная модель: для SHAP из неё берётся базовая
+    app.state.explain_model = get_base_estimator(bundle["model"])
     app.state.meta = bundle["metadata"]
     app.state.version = bundle["metadata"]["model_version"]
 
@@ -101,7 +186,7 @@ async def lifespan(app: FastAPI):
     yield
 
     app.state.model = None
-    app.state.shap_available_model = None
+    app.state.explain_model = None
 
 
 app = FastAPI(
@@ -123,6 +208,10 @@ app.mount(
 )
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+# Batch-скоринг берёт заявки из БД и помечает их обработанными:
+# параллельные запуски в одном процессе выполняются по очереди
+_batch_lock = threading.Lock()
 
 
 @app.get("/")
@@ -153,47 +242,20 @@ def ready():
     return {"status": "ready"}
 
 
-logger = logging.getLogger(__name__)
+def _require_db() -> None:
+    if not settings.database_url:
+        raise HTTPException(
+            status_code=503,
+            detail="Database is not configured",
+        )
 
 
-async def _safe_body(request: Request):
-    try:
-        return await request.json()
-    except Exception:
-        raw = await request.body()
+# --------------------------------------------------------------------------- #
+# Обработчики ошибок
+# --------------------------------------------------------------------------- #
 
-        return {
-            "raw": raw.decode(
-                "utf-8",
-                errors="replace",
-            )
-        }
-
-
-PREDICT_PATHS = {
-    "/v1/predict",
-    "/v1/predict/batch"
-}
-
-
-def _log_failure_task(
-    request_id: str,
-    body,
-    status_code: int,
-    request: Request,
-):
-    if request.url.path not in PREDICT_PATHS:
-        return None
-
-    return db.save_prediction(
-        request_id,
-        body,
-        None,
-        getattr(app.state, "version", "unknown"),
-        0.0,
-        status_code,
-    )
-
+# Ошибки не пишутся в predictions: у predictions внешний ключ на applications,
+# а заявки с неверным телом в applications не попадают.
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
@@ -201,7 +263,12 @@ async def validation_exception_handler(
     exc: RequestValidationError,
 ):
     request_id = str(uuid.uuid4())
-    body = await _safe_body(request)
+
+    logger.warning(
+        "Validation error on %s (request_id=%s)",
+        request.url.path,
+        request_id,
+    )
 
     return JSONResponse(
         status_code=422,
@@ -209,12 +276,6 @@ async def validation_exception_handler(
             "request_id": request_id,
             "detail": jsonable_encoder(exc.errors()),
         },
-        background=_log_failure_task(
-            request_id,
-            body,
-            422,
-            request,
-        ),
     )
 
 
@@ -223,13 +284,13 @@ async def unhandled_exception_handler(
     request: Request,
     exc: Exception,
 ):
-    logger.exception(
-        "Unhandled error on %s",
-        request.url.path,
-    )
-
     request_id = str(uuid.uuid4())
-    body = await _safe_body(request)
+
+    logger.exception(
+        "Unhandled error on %s (request_id=%s)",
+        request.url.path,
+        request_id,
+    )
 
     return JSONResponse(
         status_code=500,
@@ -237,19 +298,61 @@ async def unhandled_exception_handler(
             "request_id": request_id,
             "detail": "Internal server error",
         },
-        background=_log_failure_task(
-            request_id,
-            body,
-            500,
-            request,
-        ),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Подготовка признаков и скоринг
+# --------------------------------------------------------------------------- #
+
+def build_model_frame(
+    payloads: list[dict],
+    features: list[str],
+    categorical: list[str],
+) -> pd.DataFrame:
+    """Превращает заявки в вход модели так же, как при обучении:
+    - credit_history_months из earliest_cr_line на дату issue_d;
+    - emp_title и zip_code: пропуск -> "missing", strip, нижний регистр;
+    - остальные категории: пропуск -> "missing", приведение к str;
+    - числовые пропуски остаются NaN (CatBoost обрабатывает их сам).
+    """
+    frame = pd.DataFrame(payloads)
+
+    issue = pd.to_datetime(frame["issue_d"], errors="coerce")
+    earliest = pd.to_datetime(frame["earliest_cr_line"], errors="coerce")
+
+    frame["credit_history_months"] = (
+        (issue.dt.year - earliest.dt.year) * 12
+        + (issue.dt.month - earliest.dt.month)
+    )
+
+    for column in HIGH_CARDINALITY:
+        frame[column] = (
+            frame[column]
+            .fillna("missing")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+
+    for column in categorical:
+        frame[column] = frame[column].fillna("missing").astype(str)
+
+    numeric = [column for column in features if column not in categorical]
+    frame[numeric] = frame[numeric].apply(pd.to_numeric, errors="coerce")
+
+    return frame.reindex(columns=features)
 
 
 def _prepare_frame(payloads: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame(payloads).reindex(
-        columns=app.state.meta["features"]
-    )
+    meta = app.state.meta
+    features = meta["features"]
+
+    categorical = meta.get("categorical_cols") or [
+        column for column in features if column in db.TEXT_COLUMNS
+    ]
+
+    return build_model_frame(payloads, features, categorical)
 
 
 def _build_prediction(
@@ -265,7 +368,7 @@ def _build_prediction(
     explanations = explain_prediction(
         model,
         frame,
-        top_k=5,
+        top_k=TOP_K,
     )
 
     return Prediction(
@@ -283,114 +386,43 @@ def _build_prediction(
     )
 
 
-def _score_batch(
-    payloads: list[dict],
-    bg: BackgroundTasks,
-) -> list[BatchPrediction]:
-    t0 = time.perf_counter()
-
-    frame = _prepare_frame(payloads)
-
-    scores = app.state.model.predict_proba(frame)[:, 1]
-
-    explanations = explain_predictions(
-        app.state.shap_available_model,
-        frame,
-        top_k=5,
-    )
-
-    latency_ms = round(
-        (time.perf_counter() - t0) * 1000,
-        2,
-    )
-
-    threshold = float(app.state.meta["threshold"])
-
-    results = []
-
-    for payload, score, row_explanations in zip(
-        payloads,
-        scores,
-        explanations,
-        strict=True,
-    ):
-        score = float(score)
-        request_id = str(uuid.uuid4())
-        default = score >= threshold
-
-        bg.add_task(
-            db.save_prediction,
-            request_id,
-            payload,
-            score,
-            app.state.version,
-            latency_ms,
-            200,
-        )
-
-        results.append(
-            BatchPrediction(
-                request_id=request_id,
-                features=payload,
-                score=score,
-                threshold=threshold,
-                default=default,
-                decision=(
-                    "REJECT"
-                    if default
-                    else "APPROVE"
-                ),
-                explanations=[
-                    Explanation(**item)
-                    for item in row_explanations
-                ],
-            )
-        )
-
-    return results
-
-
 def _format_batch_row(
-    result: BatchPrediction,
+    application_id: str,
+    payload: dict,
+    score: float,
+    default: bool,
+    explanations: list[dict],
 ) -> dict:
     features = ", ".join(
-        f"{key}={value}"
-        for key, value in result.features.items()
+        f"{key}={payload.get(key)}"
+        for key in SUMMARY_COLUMNS
     )
 
     reasons = "; ".join(
         (
-            f"{item.feature} "
-            f"({'+' if item.impact > 0 else ''}{item.impact:.4f})"
+            f"{item['feature']} "
+            f"({'+' if item['impact'] > 0 else ''}{item['impact']:.4f})"
         )
-        for item in result.explanations
+        for item in explanations
     )
 
     return {
+        "application_id": application_id,
         "features": features,
-        "P(default)": result.score,
-        "class": "DEFAULT" if result.default else "NO DEFAULT",
-        "decision": result.decision,
+        "P(default)": score,
+        "class": "DEFAULT" if default else "NO DEFAULT",
+        "decision": "REJECT" if default else "APPROVE",
         "main reasons": reasons,
     }
 
 
-def _save_batch_csv(
-    results: list[BatchPrediction],
-) -> str:
-    rows = [
-        _format_batch_row(result)
-        for result in results
-    ]
-
-    result_df = pd.DataFrame(rows)
-
+def _save_batch_csv(rows: list[dict]) -> str:
     filename = (
         f"batch_result_"
         f"{uuid.uuid4().hex}.csv"
     )
 
-    result_df.to_csv(
+    pd.DataFrame(rows).to_csv(
         UPLOADS_DIR / filename,
         index=False,
     )
@@ -398,18 +430,49 @@ def _save_batch_csv(
     return filename
 
 
+def _persist_single(
+    application_id: str,
+    payload: dict,
+    prediction: Prediction,
+) -> None:
+    """Сохраняет заявку из /v1/predict и результат скоринга.
+    Если запись предсказания не удалась, заявка остаётся необработанной
+    и будет оценена при следующем batch-скоринге."""
+    if not settings.database_url:
+        return
+
+    db.save_applications([{**payload, "application_id": application_id}])
+    db.save_predictions([
+        {
+            "application_id": application_id,
+            "features": payload,
+            "score": prediction.score,
+            "model_version": prediction.model_version,
+            "latency_ms": prediction.latency_ms,
+            "response_code": 200,
+            "feature_importance": [
+                item.model_dump() for item in prediction.explanations
+            ],
+        }
+    ])
+
+
+# --------------------------------------------------------------------------- #
+# Одиночный скоринг (для тестов и ручных проверок)
+# --------------------------------------------------------------------------- #
+
 @app.post(
     "/v1/predict",
     response_model=Prediction,
 )
 def predict(
-    x: Features,
+    x: "Features",
     bg: BackgroundTasks,
 ) -> Prediction:
     t0 = time.perf_counter()
 
-    request_id = str(uuid.uuid4())
-    payload = x.model_dump()
+    application_id = str(uuid.uuid4())
+    payload = x.model_dump(mode="json")
 
     frame = _prepare_frame([payload])
 
@@ -422,33 +485,35 @@ def predict(
         2,
     )
 
-    bg.add_task(
-        db.save_prediction,
-        request_id,
-        payload,
-        score,
-        app.state.version,
-        latency_ms,
-        200,
-    )
-
-    return _build_prediction(
-        app.state.shap_available_model,
+    prediction = _build_prediction(
+        app.state.explain_model,
         frame,
         score,
-        request_id,
+        application_id,
         latency_ms,
     )
 
+    bg.add_task(
+        _persist_single,
+        application_id,
+        payload,
+        prediction,
+    )
+
+    return prediction
+
+
+# --------------------------------------------------------------------------- #
+# Заявки: загрузка из CSV и список необработанных
+# --------------------------------------------------------------------------- #
 
 @app.post(
-    "/v1/predict/batch",
-    response_model=BatchResult,
+    "/v1/applications/upload",
+    response_model=UploadResult,
 )
-async def predict_batch(
-    bg: BackgroundTasks,
-    file: UploadFile,
-) -> BatchResult:
+def upload_applications(file: UploadFile) -> UploadResult:
+    _require_db()
+
     if not file.filename:
         raise HTTPException(
             status_code=400,
@@ -461,13 +526,10 @@ async def predict_batch(
             detail="Only CSV files are supported",
         )
 
-    content = await file.read()
-
     try:
-        from io import BytesIO
-
         df = pd.read_csv(
-            BytesIO(content),
+            BytesIO(file.file.read()),
+            dtype=str,
         )
     except Exception as exc:
         raise HTTPException(
@@ -475,83 +537,243 @@ async def predict_batch(
             detail=f"Invalid CSV file: {exc}",
         ) from exc
 
-    feature_names = app.state.meta["features"]
+    columns = set(df.columns)
+    expected = set(db.APPLICATION_COLUMNS)
 
-    missing = [
-        column
-        for column in feature_names
-        if column not in df.columns
-    ]
+    missing = [c for c in db.APPLICATION_COLUMNS if c not in columns]
+    unexpected = sorted(columns - expected)
 
-    if missing:
+    if missing or unexpected:
         raise HTTPException(
             status_code=422,
             detail={
-                "message": "Missing required columns",
-                "columns": missing,
+                "message": "Wrong CSV columns",
+                "missing": missing,
+                "unexpected": unexpected,
             },
         )
 
-    if df.isnull().any().any():
+    if df.empty:
         raise HTTPException(
             status_code=422,
-            detail="CSV contains missing values",
+            detail="The file has no rows with applications",
         )
 
-    string_features = [
-        "emp_length",
-        "purpose",
-        "home_ownership_n",
-        "addr_state",
-        "zip_code",
-    ]
-
-    for column in string_features:
-        if column in df.columns:
-            df[column] = df[column].astype(str)
-
-    try:
-        rows = df.to_dict(
-            orient="records"
-        )
-
-        batch = BatchFeatures(
-            rows=rows,
-        )
-    except Exception as exc:
+    if len(df) > MAX_UPLOAD_ROWS:
         raise HTTPException(
             status_code=422,
-            detail=jsonable_encoder(exc.errors())
-            if hasattr(exc, "errors")
-            else str(exc),
-        ) from exc
+            detail=f"At most {MAX_UPLOAD_ROWS} rows per file",
+        )
 
-    results = _score_batch(
-        [row.model_dump() for row in batch.rows],
-        bg,
+    records = df.astype(object).where(df.notna(), None).to_dict(
+        orient="records"
     )
 
-    filename = _save_batch_csv(results)
+    rows = []
+    errors = []
 
-    approved = sum(
-        not result.default
-        for result in results
-    )
+    for number, record in enumerate(records, start=2):
+        try:
+            rows.append(Features(**record).model_dump(mode="json"))
+        except ValidationError as exc:
+            errors.append(
+                {
+                    "row": number,
+                    "errors": jsonable_encoder(
+                        exc.errors(
+                            include_url=False,
+                            include_context=False,
+                            include_input=False,
+                        )
+                    ),
+                }
+            )
 
-    rejected = sum(
-        result.default
-        for result in results
-    )
+            if len(errors) >= MAX_REPORTED_ERRORS:
+                break
 
-    preview = [
-        _format_batch_row(result)
-        for result in results[:10]
-    ]
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Invalid rows, nothing was added",
+                "rows": errors,
+            },
+        )
+
+    ids = db.save_applications(rows)
+
+    return UploadResult(added=len(ids))
+
+
+@app.get("/v1/applications/unscored")
+def unscored_applications():
+    _require_db()
+
+    return {
+        "items": jsonable_encoder(
+            db.fetch_unscored(limit=UNSCORED_LIMIT)
+        )
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Batch-скоринг необработанных заявок из БД
+# --------------------------------------------------------------------------- #
+
+@app.post(
+    "/v1/predict/batch",
+    response_model=BatchResult,
+)
+def predict_batch() -> BatchResult:
+    _require_db()
+
+    with _batch_lock:
+        applications = db.fetch_unscored(limit=BATCH_LIMIT)
+
+        if not applications:
+            return BatchResult(
+                filename="",
+                total=0,
+                approved=0,
+                rejected=0,
+                preview=[],
+            )
+
+        ids = [row.pop("application_id") for row in applications]
+        payloads = [jsonable_encoder(row) for row in applications]
+
+        t0 = time.perf_counter()
+
+        frame = _prepare_frame(payloads)
+        scores = app.state.model.predict_proba(frame)[:, 1]
+
+        latency_ms = round(
+            (time.perf_counter() - t0) * 1000,
+            2,
+        )
+
+        explanations = explain_predictions(
+            app.state.explain_model,
+            frame,
+            top_k=TOP_K,
+        )
+
+        threshold = float(app.state.meta["threshold"])
+
+        records = []
+        rows = []
+
+        for application_id, payload, score, row_explanations in zip(
+            ids,
+            payloads,
+            scores,
+            explanations,
+            strict=True,
+        ):
+            score = float(score)
+            default = score >= threshold
+
+            records.append(
+                {
+                    "application_id": application_id,
+                    "features": payload,
+                    "score": score,
+                    "model_version": app.state.version,
+                    "latency_ms": latency_ms,
+                    "response_code": 200,
+                    "feature_importance": row_explanations,
+                }
+            )
+
+            rows.append(
+                _format_batch_row(
+                    application_id,
+                    payload,
+                    score,
+                    default,
+                    row_explanations,
+                )
+            )
+
+        db.save_predictions(records)
+
+    filename = _save_batch_csv(rows)
+
+    rejected = sum(row["class"] == "DEFAULT" for row in rows)
 
     return BatchResult(
         filename=filename,
-        total=len(results),
-        approved=approved,
+        total=len(rows),
+        approved=len(rows) - rejected,
         rejected=rejected,
-        preview=preview,
+        preview=rows[:10],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Predictions: таблица и выгрузка в CSV
+# --------------------------------------------------------------------------- #
+
+def _check_dates(date_from: date | None, date_to: date | None) -> None:
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(
+            status_code=422,
+            detail="date_from must not be later than date_to",
+        )
+
+
+@app.get("/v1/predictions")
+def list_predictions(
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
+    _require_db()
+    _check_dates(date_from, date_to)
+
+    return {
+        "items": jsonable_encoder(
+            db.fetch_predictions(
+                date_from,
+                date_to,
+                limit=PREDICTIONS_LIMIT,
+            )
+        )
+    }
+
+
+@app.get("/v1/predictions/export")
+def export_predictions(
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
+    _require_db()
+    _check_dates(date_from, date_to)
+
+    columns = [
+        "application_id", "ts", "model_version", "score",
+        "latency_ms", "response_code", "features", "feature_importance",
+    ]
+
+    rows = db.fetch_predictions(date_from, date_to, details=True)
+
+    frame = pd.DataFrame(jsonable_encoder(rows), columns=columns)
+
+    for column in ("features", "feature_importance"):
+        frame[column] = frame[column].map(
+            lambda value: None
+            if value is None
+            else json.dumps(value, ensure_ascii=False)
+        )
+
+    filename = (
+        f"predictions_{date_from or 'start'}_{date_to or 'end'}.csv"
+    )
+
+    return Response(
+        content=frame.to_csv(index=False),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
     )

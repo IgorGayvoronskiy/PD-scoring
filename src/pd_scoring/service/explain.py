@@ -1,12 +1,57 @@
+import numpy as np
 import pandas as pd
 import shap
+from sklearn.calibration import CalibratedClassifierCV
+
+try:
+    from sklearn.frozen import FrozenEstimator
+except ImportError:  # scikit-learn < 1.6
+    FrozenEstimator = None
+
+
+def get_base_estimator(model):
+    """Возвращает исходную (некалиброванную) модель.
+
+    В артефакте лежит одна калиброванная модель
+    CalibratedClassifierCV(FrozenEstimator(CatBoostClassifier)). SHAP считается
+    по вложенному CatBoost: калибровка (isotonic/sigmoid) монотонна и не
+    меняет ранжирования, но SHAP-значения не умеет считать по обёртке.
+    Если передана уже некалиброванная модель, она возвращается как есть.
+    """
+    if isinstance(model, CalibratedClassifierCV):
+        base = model.calibrated_classifiers_[0].estimator
+
+        if FrozenEstimator is not None and isinstance(base, FrozenEstimator):
+            base = base.estimator
+
+        return base
+
+    return model
+
+
+def _to_python(value):
+    """Приводит значение признака к JSON-совместимому виду.
+
+    NaN и NA превращаются в None (NaN в JSON-ответе недопустим),
+    numpy-скаляры в обычные числа Python.
+    """
+    if value is None or value is pd.NA:
+        return None
+
+    if isinstance(value, np.generic):
+        value = value.item()
+
+    if isinstance(value, float) and np.isnan(value):
+        return None
+
+    return value
 
 
 def _get_shap_values(
     model,
     features: pd.DataFrame,
 ):
-    explainer = shap.Explainer(model)
+    explainer = shap.Explainer(get_base_estimator(model))
     explanation = explainer(features)
 
     values = explanation.values
@@ -30,7 +75,10 @@ def explain_predictions(
     """
     Explain multiple predictions using one SHAP explainer.
 
-    Returns one list of explanations for each input row.
+    `model` может быть как калиброванной моделью (из неё берётся базовая),
+    так и самой базовой моделью. Impact измеряется в лог-шансах базовой
+    модели: знак и порядок признаков информативны, но это не вклад
+    в калиброванную вероятность.
     """
     shap_values = _get_shap_values(
         model,
@@ -55,7 +103,7 @@ def explain_predictions(
             explanations.append(
                 {
                     "feature": feature,
-                    "value": value,
+                    "value": _to_python(value),
                     "impact": shap_value,
                     "direction": (
                         "increases P(default)"
@@ -82,11 +130,6 @@ def explain_prediction(
     features: pd.DataFrame,
     top_k: int = 5,
 ) -> list[dict]:
-    """
-    Explain a single prediction.
-
-    This is a convenience wrapper around explain_predictions().
-    """
     results = explain_predictions(
         model,
         features,
