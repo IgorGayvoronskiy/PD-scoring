@@ -1,6 +1,6 @@
 [project]
 name = "pd-scoring-service"
-version = "0.2.3"
+version = "0.2.5"
 description = "PD-scoring service"
 requires-python=">=3.11,<3.12"
 

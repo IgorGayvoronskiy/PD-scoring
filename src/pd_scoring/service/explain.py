@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import pandas as pd
 import shap
@@ -47,12 +49,34 @@ def _to_python(value):
     return value
 
 
+# Создание shap.Explainer для CatBoost занимает порядка секунды (расчёт
+# самих значений для одной заявки в десятки раз быстрее), поэтому объяснитель
+# строится один раз на модель. В кэше хранится и сама модель, чтобы её id
+# не мог быть переиспользован другим объектом.
+_EXPLAINERS: dict[int, tuple[object, shap.Explainer]] = {}
+_EXPLAINERS_LOCK = threading.Lock()
+
+
+def get_explainer(model) -> shap.Explainer:
+    """Возвращает (и при первом вызове создаёт) SHAP-объяснитель для модели.
+    Вызывайте при старте сервиса, чтобы первый запрос не ждал создания."""
+    base = get_base_estimator(model)
+
+    with _EXPLAINERS_LOCK:
+        cached = _EXPLAINERS.get(id(base))
+
+        if cached is None or cached[0] is not base:
+            cached = (base, shap.Explainer(base))
+            _EXPLAINERS[id(base)] = cached
+
+    return cached[1]
+
+
 def _get_shap_values(
     model,
     features: pd.DataFrame,
 ):
-    explainer = shap.Explainer(get_base_estimator(model))
-    explanation = explainer(features)
+    explanation = get_explainer(model)(features)
 
     values = explanation.values
 
@@ -79,6 +103,8 @@ def explain_predictions(
     так и самой базовой моделью. Impact измеряется в лог-шансах базовой
     модели: знак и порядок признаков информативны, но это не вклад
     в калиброванную вероятность.
+
+    Returns one list of explanations for each input row.
     """
     shap_values = _get_shap_values(
         model,
@@ -130,6 +156,11 @@ def explain_prediction(
     features: pd.DataFrame,
     top_k: int = 5,
 ) -> list[dict]:
+    """
+    Explain a single prediction.
+
+    This is a convenience wrapper around explain_predictions().
+    """
     results = explain_predictions(
         model,
         features,

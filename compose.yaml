@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pd}
+      POSTGRES_DB: ${POSTGRES_DB:-pd}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1: проверка по TCP; временный сервер инициализации слушает
+      # только unix-сокет, поэтому база не считается готовой раньше времени
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  service:
+    build: .
+    environment:
+      # в сети compose база доступна по имени сервиса: db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pd}:${POSTGRES_PASSWORD:-pd}@db:5432/${POSTGRES_DB:-pd}
+      MODEL_PATH: artifact/pd_model.joblib
+      LOG_LEVEL: INFO
+    ports:
+      # интерфейс: http://localhost:8000
+      - "8000:8000"
+    volumes:
+      # CSV с результатами batch-скоринга переживают пересоздание контейнера
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  uploads:

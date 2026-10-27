@@ -32,6 +32,7 @@ from pd_scoring.service.explain import (
     explain_prediction,
     explain_predictions,
     get_base_estimator,
+    get_explainer,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -54,7 +55,7 @@ MAX_REPORTED_ERRORS = 20
 # (пропуск -> "missing", обрезка пробелов, нижний регистр)
 HIGH_CARDINALITY = ["emp_title", "zip_code"]
 
-# Признаки для краткого описания заявки в таблице и CSV с результатами
+# Признаки для краткого описания заявки в таблице
 SUMMARY_COLUMNS = [
     "loan_amnt", "term", "purpose", "annual_inc", "dti", "fico_range_low",
 ]
@@ -178,6 +179,8 @@ async def lifespan(app: FastAPI):
     app.state.model = bundle["model"]
     # В артефакте одна калиброванная модель: для SHAP из неё берётся базовая
     app.state.explain_model = get_base_estimator(bundle["model"])
+    # Создание SHAP-объяснителя занимает около секунды: делаем это при старте
+    get_explainer(app.state.explain_model)
     app.state.meta = bundle["metadata"]
     app.state.version = bundle["metadata"]["model_version"]
 
@@ -466,7 +469,7 @@ def _persist_single(
     response_model=Prediction,
 )
 def predict(
-    x: "Features",
+    x: Features,
     bg: BackgroundTasks,
 ) -> Prediction:
     t0 = time.perf_counter()
@@ -527,6 +530,7 @@ def upload_applications(file: UploadFile) -> UploadResult:
         )
 
     try:
+        # Всё читаем как строки: типы проверяет pydantic, пустые ячейки -> NaN
         df = pd.read_csv(
             BytesIO(file.file.read()),
             dtype=str,
@@ -572,6 +576,7 @@ def upload_applications(file: UploadFile) -> UploadResult:
     rows = []
     errors = []
 
+    # Номер строки в файле: первая строка это заголовок
     for number, record in enumerate(records, start=2):
         try:
             rows.append(Features(**record).model_dump(mode="json"))
@@ -592,6 +597,7 @@ def upload_applications(file: UploadFile) -> UploadResult:
             if len(errors) >= MAX_REPORTED_ERRORS:
                 break
 
+    # Файл загружается целиком или не загружается вовсе
     if errors:
         raise HTTPException(
             status_code=422,
@@ -696,6 +702,7 @@ def predict_batch() -> BatchResult:
                 )
             )
 
+        # Предсказания и scored = true записываются одной транзакцией
         db.save_predictions(records)
 
     filename = _save_batch_csv(rows)
