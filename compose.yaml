@@ -1,3 +1,5 @@
+name: pd-scoring
+
 services:
   db:
     image: postgres:16
@@ -8,8 +10,6 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      # -h 127.0.0.1: проверка по TCP; временный сервер инициализации слушает
-      # только unix-сокет, поэтому база не считается готовой раньше времени
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
@@ -19,16 +19,17 @@ services:
   service:
     build: .
     environment:
-      # в сети compose база доступна по имени сервиса: db
       DATABASE_URL: postgresql://${POSTGRES_USER:-pd}:${POSTGRES_PASSWORD:-pd}@db:5432/${POSTGRES_DB:-pd}
-      MODEL_PATH: artifact/pd_model.joblib
+      MLFLOW_TRACKING_URI: http://mlflow-server:5000
+      MODEL_NAME: pd_scoring
+      MODEL_ALIAS: champion
       LOG_LEVEL: INFO
-    ports:
-      # интерфейс: http://localhost:8000
-      - "8000:8000"
-    volumes:
-      # CSV с результатами batch-скоринга переживают пересоздание контейнера
-      - uploads:/app/uploads
+    networks:
+      default: {}
+      mlflow-network: {}
+      web:
+        aliases:
+          - pd-ui
     depends_on:
       db:
         condition: service_healthy
@@ -40,6 +41,13 @@ services:
       start_period: 60s
     restart: unless-stopped
 
+networks:
+  mlflow-network:
+    external: true
+    name: mlflow-network
+  web:
+    external: true
+    name: web
+
 volumes:
   pgdata:
-  uploads:

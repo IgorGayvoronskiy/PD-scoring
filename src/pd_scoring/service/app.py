@@ -3,13 +3,13 @@ import logging
 import threading
 import time
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
-import joblib
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -28,6 +28,7 @@ from pydantic import (
 
 from pd_scoring import db
 from pd_scoring.config import settings
+from pd_scoring.model_store import load_model
 from pd_scoring.service.explain import (
     explain_prediction,
     explain_predictions,
@@ -38,16 +39,14 @@ from pd_scoring.service.explain import (
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
-UPLOADS_DIR = Path("uploads")
-
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
 TOP_K = 5
-BATCH_LIMIT = 1000          # заявок за один запуск batch-скоринга
+BATCH_LIMIT = 1000          # заявок за один запуск скоринга
 UNSCORED_LIMIT = 1000       # строк в таблице необработанных заявок
 PREDICTIONS_LIMIT = 1000    # строк в таблице predictions (экспорт без лимита)
+REVIEW_LIMIT = 1000         # строк в очереди review
 MAX_UPLOAD_ROWS = 10_000
 MAX_REPORTED_ERRORS = 20
 
@@ -55,10 +54,13 @@ MAX_REPORTED_ERRORS = 20
 # (пропуск -> "missing", обрезка пробелов, нижний регистр)
 HIGH_CARDINALITY = ["emp_title", "zip_code"]
 
-# Признаки для краткого описания заявки в таблице
+# Признаки для краткого описания заявки в таблице predictions
+# (тот же список продублирован в static/app.js)
 SUMMARY_COLUMNS = [
     "loan_amnt", "term", "purpose", "annual_inc", "dti", "fico_range_low",
 ]
+
+Period = Literal["today", "week", "month", "year", "all"]
 
 
 # --------------------------------------------------------------------------- #
@@ -148,24 +150,43 @@ class Explanation(BaseModel):
 class Prediction(BaseModel):
     request_id: str
     score: float
-    threshold: float
-    default: bool
-    decision: str
+    t_low: float
+    t_high: float
+    decision: Literal["APPROVE", "REVIEW", "DECLINE"]
     explanations: list[Explanation]
     model_version: str
     latency_ms: float
 
 
 class BatchResult(BaseModel):
-    filename: str
     total: int
     approved: int
-    rejected: int
-    preview: list[dict]
+    review: int
+    declined: int
 
 
 class UploadResult(BaseModel):
     added: int
+
+
+class ReviewDecision(BaseModel):
+    decision: Literal["APPROVE", "DECLINE"]
+
+
+# --------------------------------------------------------------------------- #
+# Решение по заявке
+# --------------------------------------------------------------------------- #
+
+def decide(score: float, t_low: float, t_high: float) -> str:
+    """score < t_low -> APPROVE; t_low <= score < t_high -> REVIEW;
+    score >= t_high -> DECLINE."""
+    if score < t_low:
+        return "APPROVE"
+
+    if score < t_high:
+        return "REVIEW"
+
+    return "DECLINE"
 
 
 # --------------------------------------------------------------------------- #
@@ -174,15 +195,27 @@ class UploadResult(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    bundle = joblib.load(settings.model_path)
+    model, meta, version = load_model()
 
-    app.state.model = bundle["model"]
+    app.state.model = model
     # В артефакте одна калиброванная модель: для SHAP из неё берётся базовая
-    app.state.explain_model = get_base_estimator(bundle["model"])
+    app.state.explain_model = get_base_estimator(model)
     # Создание SHAP-объяснителя занимает около секунды: делаем это при старте
     get_explainer(app.state.explain_model)
-    app.state.meta = bundle["metadata"]
-    app.state.version = bundle["metadata"]["model_version"]
+    app.state.meta = meta
+    app.state.version = version
+
+    # Пороги решения берутся из метаданных модели
+    t_low = float(app.state.meta["t_low"])
+    t_high = float(app.state.meta["t_high"])
+
+    if not t_low <= t_high:
+        raise ValueError(
+            f"t_low must not exceed t_high, got {t_low} and {t_high}"
+        )
+
+    app.state.t_low = t_low
+    app.state.t_high = t_high
 
     db.init()
 
@@ -204,15 +237,9 @@ app.mount(
     name="static",
 )
 
-app.mount(
-    "/uploads",
-    StaticFiles(directory=UPLOADS_DIR),
-    name="uploads",
-)
-
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-# Batch-скоринг берёт заявки из БД и помечает их обработанными:
+# Скоринг берёт заявки из БД и помечает их обработанными:
 # параллельные запуски в одном процессе выполняются по очереди
 _batch_lock = threading.Lock()
 
@@ -365,8 +392,8 @@ def _build_prediction(
     request_id: str,
     latency_ms: float,
 ) -> Prediction:
-    threshold = float(app.state.meta["threshold"])
-    default = score >= threshold
+    t_low = app.state.t_low
+    t_high = app.state.t_high
 
     explanations = explain_prediction(
         model,
@@ -377,9 +404,9 @@ def _build_prediction(
     return Prediction(
         request_id=request_id,
         score=score,
-        threshold=threshold,
-        default=default,
-        decision="REJECT" if default else "APPROVE",
+        t_low=t_low,
+        t_high=t_high,
+        decision=decide(score, t_low, t_high),
         explanations=[
             Explanation(**item)
             for item in explanations
@@ -389,50 +416,6 @@ def _build_prediction(
     )
 
 
-def _format_batch_row(
-    application_id: str,
-    payload: dict,
-    score: float,
-    default: bool,
-    explanations: list[dict],
-) -> dict:
-    features = ", ".join(
-        f"{key}={payload.get(key)}"
-        for key in SUMMARY_COLUMNS
-    )
-
-    reasons = "; ".join(
-        (
-            f"{item['feature']} "
-            f"({'+' if item['impact'] > 0 else ''}{item['impact']:.4f})"
-        )
-        for item in explanations
-    )
-
-    return {
-        "application_id": application_id,
-        "features": features,
-        "P(default)": score,
-        "class": "DEFAULT" if default else "NO DEFAULT",
-        "decision": "REJECT" if default else "APPROVE",
-        "main reasons": reasons,
-    }
-
-
-def _save_batch_csv(rows: list[dict]) -> str:
-    filename = (
-        f"batch_result_"
-        f"{uuid.uuid4().hex}.csv"
-    )
-
-    pd.DataFrame(rows).to_csv(
-        UPLOADS_DIR / filename,
-        index=False,
-    )
-
-    return filename
-
-
 def _persist_single(
     application_id: str,
     payload: dict,
@@ -440,7 +423,7 @@ def _persist_single(
 ) -> None:
     """Сохраняет заявку из /v1/predict и результат скоринга.
     Если запись предсказания не удалась, заявка остаётся необработанной
-    и будет оценена при следующем batch-скоринге."""
+    и будет оценена при следующем запуске скоринга."""
     if not settings.database_url:
         return
 
@@ -450,6 +433,7 @@ def _persist_single(
             "application_id": application_id,
             "features": payload,
             "score": prediction.score,
+            "decision": prediction.decision,
             "model_version": prediction.model_version,
             "latency_ms": prediction.latency_ms,
             "response_code": 200,
@@ -624,7 +608,7 @@ def unscored_applications():
 
 
 # --------------------------------------------------------------------------- #
-# Batch-скоринг необработанных заявок из БД
+# Скоринг необработанных заявок из БД
 # --------------------------------------------------------------------------- #
 
 @app.post(
@@ -639,11 +623,10 @@ def predict_batch() -> BatchResult:
 
         if not applications:
             return BatchResult(
-                filename="",
                 total=0,
                 approved=0,
-                rejected=0,
-                preview=[],
+                review=0,
+                declined=0,
             )
 
         ids = [row.pop("application_id") for row in applications]
@@ -665,10 +648,11 @@ def predict_batch() -> BatchResult:
             top_k=TOP_K,
         )
 
-        threshold = float(app.state.meta["threshold"])
+        t_low = app.state.t_low
+        t_high = app.state.t_high
 
         records = []
-        rows = []
+        counts = Counter()
 
         for application_id, payload, score, row_explanations in zip(
             ids,
@@ -678,13 +662,16 @@ def predict_batch() -> BatchResult:
             strict=True,
         ):
             score = float(score)
-            default = score >= threshold
+            decision = decide(score, t_low, t_high)
+
+            counts[decision] += 1
 
             records.append(
                 {
                     "application_id": application_id,
                     "features": payload,
                     "score": score,
+                    "decision": decision,
                     "model_version": app.state.version,
                     "latency_ms": latency_ms,
                     "response_code": 200,
@@ -692,29 +679,14 @@ def predict_batch() -> BatchResult:
                 }
             )
 
-            rows.append(
-                _format_batch_row(
-                    application_id,
-                    payload,
-                    score,
-                    default,
-                    row_explanations,
-                )
-            )
-
         # Предсказания и scored = true записываются одной транзакцией
         db.save_predictions(records)
 
-    filename = _save_batch_csv(rows)
-
-    rejected = sum(row["class"] == "DEFAULT" for row in rows)
-
     return BatchResult(
-        filename=filename,
-        total=len(rows),
-        approved=len(rows) - rejected,
-        rejected=rejected,
-        preview=rows[:10],
+        total=len(records),
+        approved=counts["APPROVE"],
+        review=counts["REVIEW"],
+        declined=counts["DECLINE"],
     )
 
 
@@ -722,47 +694,31 @@ def predict_batch() -> BatchResult:
 # Predictions: таблица и выгрузка в CSV
 # --------------------------------------------------------------------------- #
 
-def _check_dates(date_from: date | None, date_to: date | None) -> None:
-    if date_from and date_to and date_from > date_to:
-        raise HTTPException(
-            status_code=422,
-            detail="date_from must not be later than date_to",
-        )
-
-
 @app.get("/v1/predictions")
-def list_predictions(
-    date_from: date | None = None,
-    date_to: date | None = None,
-):
+def list_predictions(period: Period = "all"):
     _require_db()
-    _check_dates(date_from, date_to)
 
     return {
         "items": jsonable_encoder(
             db.fetch_predictions(
-                date_from,
-                date_to,
+                period,
                 limit=PREDICTIONS_LIMIT,
+                summary_keys=SUMMARY_COLUMNS,
             )
         )
     }
 
 
 @app.get("/v1/predictions/export")
-def export_predictions(
-    date_from: date | None = None,
-    date_to: date | None = None,
-):
+def export_predictions(period: Period = "all"):
     _require_db()
-    _check_dates(date_from, date_to)
 
     columns = [
-        "application_id", "ts", "model_version", "score",
+        "application_id", "ts", "model_version", "score", "decision",
         "latency_ms", "response_code", "features", "feature_importance",
     ]
 
-    rows = db.fetch_predictions(date_from, date_to, details=True)
+    rows = db.fetch_predictions(period, details=True)
 
     frame = pd.DataFrame(jsonable_encoder(rows), columns=columns)
 
@@ -773,14 +729,42 @@ def export_predictions(
             else json.dumps(value, ensure_ascii=False)
         )
 
-    filename = (
-        f"predictions_{date_from or 'start'}_{date_to or 'end'}.csv"
-    )
-
     return Response(
         content=frame.to_csv(index=False),
         media_type="text/csv",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"'
+            "Content-Disposition":
+                f'attachment; filename="predictions_{period}.csv"'
         },
     )
+
+
+# --------------------------------------------------------------------------- #
+# Review: ручной разбор заявок с decision = REVIEW
+# --------------------------------------------------------------------------- #
+
+@app.get("/v1/review")
+def list_review():
+    _require_db()
+
+    return {
+        "items": jsonable_encoder(
+            db.fetch_review(limit=REVIEW_LIMIT)
+        )
+    }
+
+
+@app.post("/v1/review/{application_id}/decision")
+def resolve_review(application_id: uuid.UUID, body: ReviewDecision):
+    _require_db()
+
+    if not db.resolve_review(str(application_id), body.decision):
+        raise HTTPException(
+            status_code=409,
+            detail="Application is not waiting for review",
+        )
+
+    return {
+        "application_id": str(application_id),
+        "decision": body.decision,
+    }

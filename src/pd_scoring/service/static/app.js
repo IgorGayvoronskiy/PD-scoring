@@ -38,7 +38,10 @@ const API = {
     unscoredApplications: "/v1/applications/unscored",
     batchPredict: "/v1/predict/batch",
     predictions: "/v1/predictions",
-    predictionsExport: "/v1/predictions/export"
+    predictionsExport: "/v1/predictions/export",
+    review: "/v1/review",
+    reviewDecision: (id) =>
+        `/v1/review/${encodeURIComponent(id)}/decision`
 };
 
 const APPLICATION_COLUMNS = [
@@ -62,11 +65,21 @@ const APPLICATION_COLUMNS = [
     "total_bal_ex_mort", "total_bc_limit", "total_il_high_credit_limit"
 ];
 
+// Должен совпадать с SUMMARY_COLUMNS из app.py
+const SUMMARY_COLUMNS = [
+    "loan_amnt", "term", "purpose", "annual_inc", "dti", "fico_range_low"
+];
+
 const UNSCORED_COLUMNS = ["application_id", ...APPLICATION_COLUMNS];
 
 const PREDICTION_COLUMNS = [
-    "application_id", "ts", "model_version",
-    "score", "latency_ms", "response_code"
+    "application_id", "ts", "decision", "score",
+    ...SUMMARY_COLUMNS,
+    "model_version", "latency_ms", "response_code"
+];
+
+const REVIEW_COLUMNS = [
+    "application_id", "ts", "decision", "score", "model_version"
 ];
 
 
@@ -153,7 +166,15 @@ function makeCell(text, className) {
 }
 
 
-function renderTable(headId, bodyId, columns, rows, formatValue) {
+// Цвет решения: DECLINE красный, REVIEW жёлтый, APPROVE зелёный
+function decisionClass(value) {
+    return `decision decision-${String(value).toLowerCase()}`;
+}
+
+
+function renderTable(
+    headId, bodyId, columns, rows, formatValue, cellClass
+) {
     const head = document.getElementById(headId);
     const body = document.getElementById(bodyId);
 
@@ -191,7 +212,10 @@ function renderTable(headId, bodyId, columns, rows, formatValue) {
                 row.appendChild(makeCell("—", "null"));
             } else {
                 row.appendChild(
-                    makeCell(formatValue(column, value))
+                    makeCell(
+                        formatValue(column, value),
+                        cellClass ? cellClass(column, value) : undefined
+                    )
                 );
             }
         });
@@ -260,7 +284,7 @@ function buildQuery(params) {
 
 
 // ---------------------------------------------------------------------------
-// Вкладка Applications: загрузка CSV и необработанные заявки
+// Вкладка Applications: загрузка CSV, необработанные заявки, запуск скоринга
 // ---------------------------------------------------------------------------
 
 async function loadUnscored() {
@@ -361,23 +385,15 @@ document
     });
 
 
-// ---------------------------------------------------------------------------
-// Вкладка Batch scoring
-// ---------------------------------------------------------------------------
-
+// Скоринг всех необработанных заявок
 document
-    .getElementById("batch-form")
-    .addEventListener("submit", async (event) => {
+    .getElementById("predict-submit")
+    .addEventListener("click", async () => {
 
-        event.preventDefault();
+        hideError("predict-error");
+        hideError("predict-success");
 
-        hideError("batch-error");
-
-        document
-            .getElementById("batch-result")
-            .classList.add("hidden");
-
-        setLoading("batch", true);
+        setLoading("predict", true);
 
         try {
             const data = await request(
@@ -392,91 +408,24 @@ document
                 );
             }
 
-            document.getElementById(
-                "batch-total"
-            ).textContent =
-                data.total;
+            showSuccess(
+                "predict-success",
+                `Scored ${data.total}: `
+                + `${data.approved} approved, `
+                + `${data.review} sent to review, `
+                + `${data.declined} declined.`
+            );
 
-            document.getElementById(
-                "batch-approved"
-            ).textContent =
-                data.approved;
-
-            document.getElementById(
-                "batch-rejected"
-            ).textContent =
-                data.rejected;
-
-            const downloadLink =
-                document.getElementById(
-                    "download-link"
-                );
-
-            downloadLink.href =
-                data.download_url ||
-                `/uploads/${encodeURIComponent(
-                    data.filename
-                )}`;
-
-            downloadLink.download =
-                data.filename || "";
-
-            const tbody =
-                document.getElementById(
-                    "batch-body"
-                );
-
-            tbody.innerHTML = "";
-
-            data.preview.forEach((item) => {
-                const row =
-                    document.createElement("tr");
-
-                row.appendChild(
-                    makeCell(item.application_id)
-                );
-                row.appendChild(
-                    makeCell(item.features)
-                );
-                row.appendChild(
-                    makeCell(
-                        formatNumber(
-                            item["P(default)"]
-                        )
-                    )
-                );
-                row.appendChild(
-                    makeCell(item.class)
-                );
-                row.appendChild(
-                    makeCell(item.decision)
-                );
-                row.appendChild(
-                    makeCell(item["main reasons"])
-                );
-
-                tbody.appendChild(row);
-            });
-
-            document
-                .getElementById(
-                    "batch-result"
-                )
-                .classList.remove(
-                    "hidden"
-                );
-
-            // Оценённые заявки уходят из очереди и появляются в predictions
+            // Оценённые заявки уходят из очереди и появляются
+            // в predictions, а часть из них в review
             loadUnscored();
             loadPredictions();
+            loadReview();
 
         } catch (error) {
-            showError(
-                "batch-error",
-                error.message
-            );
+            showError("predict-error", error.message);
         } finally {
-            setLoading("batch", false);
+            setLoading("predict", false);
         }
     });
 
@@ -485,18 +434,7 @@ document
 // Вкладка Predictions: таблица и выгрузка в CSV
 // ---------------------------------------------------------------------------
 
-function getDateRange() {
-    const dateFrom = document.getElementById("date-from").value;
-    const dateTo = document.getElementById("date-to").value;
-
-    if (dateFrom && dateTo && dateFrom > dateTo) {
-        throw new Error(
-            "The start date must not be later than the end date."
-        );
-    }
-
-    return { date_from: dateFrom, date_to: dateTo };
-}
+let currentPeriod = "week";
 
 
 function formatPredictionValue(column, value) {
@@ -516,56 +454,66 @@ function formatPredictionValue(column, value) {
 }
 
 
+function predictionCellClass(column, value) {
+    return column === "decision" ? decisionClass(value) : undefined;
+}
+
+
 async function loadPredictions() {
     hideError("pred-error");
 
-    let range;
+    document.getElementById("pred-loader").classList.remove("hidden");
 
     try {
-        range = getDateRange();
-    } catch (error) {
-        showError("pred-error", error.message);
-        return;
-    }
-
-    setLoading("pred", true);
-
-    try {
-        const query = buildQuery(range);
+        const query = buildQuery({ period: currentPeriod });
 
         const data = await request(
-            query
-                ? `${API.predictions}?${query}`
-                : API.predictions,
+            `${API.predictions}?${query}`,
             {},
-            () => mockFetchPredictions(range)
+            () => mockFetchPredictions(currentPeriod)
         );
 
         document.getElementById(
             "pred-count"
         ).textContent = data.items.length;
 
+        // Признаки из SUMMARY_COLUMNS приходят вложенным объектом features
+        const rows = data.items.map((item) => ({
+            ...(item.features || {}),
+            ...item
+        }));
+
         renderTable(
             "pred-head",
             "pred-body",
             PREDICTION_COLUMNS,
-            data.items,
-            formatPredictionValue
+            rows,
+            formatPredictionValue,
+            predictionCellClass
         );
 
     } catch (error) {
         showError("pred-error", error.message);
     } finally {
-        setLoading("pred", false);
+        document.getElementById("pred-loader").classList.add("hidden");
     }
 }
 
 
 document
-    .getElementById("pred-form")
-    .addEventListener("submit", (event) => {
-        event.preventDefault();
-        loadPredictions();
+    .querySelectorAll("#period-buttons .period")
+    .forEach((button) => {
+        button.addEventListener("click", () => {
+            currentPeriod = button.dataset.period;
+
+            document
+                .querySelectorAll("#period-buttons .period")
+                .forEach((item) => {
+                    item.classList.toggle("active", item === button);
+                });
+
+            loadPredictions();
+        });
     });
 
 
@@ -576,17 +524,7 @@ document
 
         hideError("pred-error");
 
-        let range;
-
-        try {
-            range = getDateRange();
-        } catch (error) {
-            showError("pred-error", error.message);
-            return;
-        }
-
-        const filename =
-            `predictions_${range.date_from || "start"}_${range.date_to || "end"}.csv`;
+        const filename = `predictions_${currentPeriod}.csv`;
 
         button.disabled = true;
 
@@ -594,16 +532,14 @@ document
             if (USE_MOCK) {
                 await sleep(400);
                 triggerDownload(
-                    mockExportPredictions(range),
+                    mockExportPredictions(currentPeriod),
                     filename
                 );
             } else {
-                const query = buildQuery(range);
-
                 triggerDownload(
-                    query
-                        ? `${API.predictionsExport}?${query}`
-                        : API.predictionsExport,
+                    `${API.predictionsExport}?${buildQuery({
+                        period: currentPeriod
+                    })}`,
                     filename
                 );
             }
@@ -612,6 +548,326 @@ document
         } finally {
             button.disabled = false;
         }
+    });
+
+
+// ---------------------------------------------------------------------------
+// Вкладка Review: заявки с decision = REVIEW
+// ---------------------------------------------------------------------------
+
+let reviewItems = [];
+
+
+function updateReviewCount() {
+    const count = reviewItems.length;
+
+    document.getElementById("review-count").textContent = count;
+    document.getElementById("review-tab-count").textContent = count;
+}
+
+
+function showEmptyReview() {
+    const body = document.getElementById("review-body");
+    const row = document.createElement("tr");
+    const cell = makeCell("No applications for review", "empty");
+
+    cell.colSpan = REVIEW_COLUMNS.length + 1;
+    row.appendChild(cell);
+    body.appendChild(row);
+}
+
+
+function renderReviewHead() {
+    const head = document.getElementById("review-head");
+    const row = document.createElement("tr");
+
+    // Первый столбец под стрелку раскрытия
+    ["", ...REVIEW_COLUMNS].forEach((column) => {
+        const th = document.createElement("th");
+        th.textContent = column;
+        row.appendChild(th);
+    });
+
+    head.innerHTML = "";
+    head.appendChild(row);
+}
+
+
+function formatFeatureValue(value) {
+    if (value === null || value === undefined) {
+        return "—";
+    }
+
+    return typeof value === "number"
+        ? String(Number(value.toFixed(4)))
+        : String(value);
+}
+
+
+// Диаграмма вкладов: вправо красным (повышает P(default)),
+// влево зелёным (понижает). Длина считается от максимального вклада.
+function buildImportanceChart(importance) {
+    const chart = document.createElement("div");
+
+    chart.className = "importance";
+
+    const maxImpact = Math.max(
+        ...importance.map((item) => Math.abs(item.impact)),
+        1e-9
+    );
+
+    importance.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "importance-row";
+
+        const name = document.createElement("span");
+        name.className = "importance-name";
+        name.textContent = item.feature;
+
+        const value = document.createElement("span");
+        value.className = "importance-value";
+        value.textContent = formatFeatureValue(item.value);
+
+        const track = document.createElement("div");
+        track.className = "bar-track";
+
+        const fill = document.createElement("div");
+        const positive = item.impact > 0;
+
+        fill.className = `bar-fill ${positive ? "positive" : "negative"}`;
+        fill.style.width = `${(Math.abs(item.impact) / maxImpact) * 50}%`;
+        fill.title = item.direction || "";
+
+        track.appendChild(fill);
+
+        const impact = document.createElement("span");
+        impact.className = "importance-impact";
+        impact.textContent =
+            `${positive ? "+" : ""}${item.impact.toFixed(4)}`;
+
+        row.append(name, value, track, impact);
+        chart.appendChild(row);
+    });
+
+    return chart;
+}
+
+
+function buildReviewActions(item, rows) {
+    const actions = document.createElement("div");
+    actions.className = "review-actions";
+
+    const label = document.createElement("span");
+    label.className = "review-actions-label";
+    label.textContent = "Move to:";
+
+    const toggle = document.createElement("div");
+    toggle.className = "toggle";
+    toggle.setAttribute("role", "group");
+
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "primary-button";
+    save.textContent = "Confirm";
+    save.disabled = true;
+
+    let chosen = null;
+
+    ["APPROVE", "DECLINE"].forEach((decision) => {
+        const option = document.createElement("button");
+
+        option.type = "button";
+        option.className =
+            `toggle-option toggle-${decision.toLowerCase()}`;
+        option.textContent = decision;
+
+        option.addEventListener("click", () => {
+            chosen = decision;
+            save.disabled = false;
+
+            toggle.querySelectorAll(".toggle-option").forEach((el) => {
+                el.classList.toggle("active", el === option);
+            });
+        });
+
+        toggle.appendChild(option);
+    });
+
+    save.addEventListener("click", async () => {
+        if (!chosen) {
+            return;
+        }
+
+        hideError("review-error");
+        hideError("review-success");
+
+        save.disabled = true;
+
+        try {
+            await request(
+                API.reviewDecision(item.application_id),
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ decision: chosen })
+                },
+                () => mockResolveReview(item.application_id, chosen)
+            );
+
+            rows.forEach((row) => row.remove());
+
+            reviewItems = reviewItems.filter(
+                (entry) => entry.application_id !== item.application_id
+            );
+
+            updateReviewCount();
+
+            if (!reviewItems.length) {
+                showEmptyReview();
+            }
+
+            showSuccess(
+                "review-success",
+                `Application ${item.application_id} moved to ${chosen}.`
+            );
+
+            // Решение изменилось, обновляем таблицу predictions
+            loadPredictions();
+
+        } catch (error) {
+            save.disabled = false;
+            showError("review-error", error.message);
+        }
+    });
+
+    actions.append(label, toggle, save);
+
+    return actions;
+}
+
+
+function buildReviewRows(item) {
+    const row = document.createElement("tr");
+
+    row.className = "review-row";
+    row.tabIndex = 0;
+    row.setAttribute("aria-expanded", "false");
+
+    const chevron = makeCell("▸", "chevron");
+    row.appendChild(chevron);
+
+    REVIEW_COLUMNS.forEach((column) => {
+        const value = item[column];
+
+        if (value === null || value === undefined) {
+            row.appendChild(makeCell("—", "null"));
+        } else {
+            row.appendChild(
+                makeCell(
+                    formatPredictionValue(column, value),
+                    predictionCellClass(column, value)
+                )
+            );
+        }
+    });
+
+    const detail = document.createElement("tr");
+    detail.className = "detail-row hidden";
+
+    const cell = document.createElement("td");
+    cell.colSpan = REVIEW_COLUMNS.length + 1;
+
+    const panel = document.createElement("div");
+    panel.className = "detail-panel";
+
+    const title = document.createElement("h3");
+    title.textContent = "Main reasons";
+
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent =
+        "Red bars increase P(default), green bars decrease it. "
+        + "Impact is measured in log-odds of the base model.";
+
+    panel.append(title, hint);
+
+    if (item.feature_importance && item.feature_importance.length) {
+        panel.appendChild(buildImportanceChart(item.feature_importance));
+    } else {
+        const empty = document.createElement("p");
+        empty.className = "hint";
+        empty.textContent = "No feature importance saved.";
+        panel.appendChild(empty);
+    }
+
+    panel.appendChild(buildReviewActions(item, [row, detail]));
+
+    cell.appendChild(panel);
+    detail.appendChild(cell);
+
+    const toggleRow = () => {
+        const isHidden = detail.classList.toggle("hidden");
+
+        row.setAttribute("aria-expanded", String(!isHidden));
+        chevron.textContent = isHidden ? "▸" : "▾";
+    };
+
+    row.addEventListener("click", toggleRow);
+
+    row.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggleRow();
+        }
+    });
+
+    return [row, detail];
+}
+
+
+async function loadReview() {
+    hideError("review-error");
+    setLoading("review", true);
+
+    try {
+        const data = await request(
+            API.review,
+            {},
+            mockFetchReview
+        );
+
+        reviewItems = data.items;
+
+        renderReviewHead();
+
+        const body = document.getElementById("review-body");
+        body.innerHTML = "";
+
+        reviewItems.forEach((item) => {
+            buildReviewRows(item).forEach((row) => {
+                body.appendChild(row);
+            });
+        });
+
+        if (!reviewItems.length) {
+            showEmptyReview();
+        }
+
+        updateReviewCount();
+
+    } catch (error) {
+        showError("review-error", error.message);
+    } finally {
+        setLoading("review", false);
+    }
+}
+
+
+document
+    .getElementById("review-submit")
+    .addEventListener("click", () => {
+        hideError("review-success");
+        loadReview();
     });
 
 
@@ -647,13 +903,24 @@ const MOCK_NUMBER = {
 const MOCK_EMPTYABLE = /^(mths_since|num_|mo_sin|emp_)/;
 
 const MOCK_REASON_FEATURES = [
-    "dti", "fico_range_low", "loan_amnt",
-    "annual_inc", "revol_util", "num_tl_op_past_12m"
+    "dti", "fico_range_low", "loan_amnt", "annual_inc",
+    "revol_util", "num_tl_op_past_12m", "term", "purpose"
 ];
 
-const MOCK_THRESHOLD = 0.2;
+const MOCK_T_LOW = 0.12;
+const MOCK_T_HIGH = 0.3;
+const MOCK_TOP_K = 5;
 
 const mockDb = { unscored: [], predictions: [] };
+
+
+function mockDecision(score) {
+    if (score < MOCK_T_LOW) {
+        return "APPROVE";
+    }
+
+    return score < MOCK_T_HIGH ? "REVIEW" : "DECLINE";
+}
 
 
 function uuid() {
@@ -706,32 +973,45 @@ function makeMockApplication() {
 }
 
 
-function makeMockReasons() {
+function makeMockReasons(application) {
     return MOCK_REASON_FEATURES
         .slice()
         .sort(() => Math.random() - 0.5)
-        .slice(0, 3)
-        .map((feature) => ({
-            feature,
-            impact: Number(rnd(-0.05, 0.05).toFixed(4))
-        }));
+        .slice(0, MOCK_TOP_K)
+        .map((feature) => {
+            const impact = Number(rnd(-0.6, 0.6).toFixed(4));
+
+            return {
+                feature,
+                value: application[feature],
+                impact,
+                direction: impact > 0
+                    ? "increases P(default)"
+                    : "decreases P(default)"
+            };
+        })
+        .sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact));
 }
 
 
 function makeMockPrediction(application, timestamp) {
+    const score = rnd(0.02, 0.45);
+    const features = {};
+
+    SUMMARY_COLUMNS.forEach((column) => {
+        features[column] = application[column];
+    });
+
     return {
         application_id: application.application_id,
         ts: timestamp,
         model_version: "mock-0.1",
-        score: rnd(0.02, 0.45),
+        score,
+        decision: mockDecision(score),
         latency_ms: rnd(5, 40),
         response_code: 200,
-        features: {
-            loan_amnt: application.loan_amnt,
-            purpose: application.purpose,
-            fico_range_low: application.fico_range_low
-        },
-        feature_importance: makeMockReasons()
+        features,
+        feature_importance: makeMockReasons(application)
     };
 }
 
@@ -741,9 +1021,11 @@ function seedMock() {
         mockDb.unscored.push(makeMockApplication());
     }
 
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 60; i++) {
+        const days = Math.random() < 0.2 ? 0 : rndInt(0, 400);
+
         const date = new Date(
-            Date.now() - rndInt(0, 30) * 86400000 - rndInt(0, 86000) * 1000
+            Date.now() - days * 86400000 - rndInt(0, 40000) * 1000
         );
 
         mockDb.predictions.push(
@@ -755,13 +1037,29 @@ function seedMock() {
 }
 
 
-function filterByDates(items, range) {
-    return items.filter((item) => {
-        const day = item.ts.slice(0, 10);
+// Начало периода в UTC, как на бэкенде. all: без ограничения.
+function periodStart(period) {
+    const now = new Date();
+    const day = 86400000;
 
-        return (!range.date_from || day >= range.date_from)
-            && (!range.date_to || day <= range.date_to);
-    });
+    if (period === "today") {
+        return new Date(Date.UTC(
+            now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()
+        ));
+    }
+
+    const days = { week: 7, month: 30, year: 365 }[period];
+
+    return days ? new Date(now.getTime() - days * day) : null;
+}
+
+
+function filterByPeriod(items, period) {
+    const start = periodStart(period);
+
+    return start
+        ? items.filter((item) => new Date(item.ts) >= start)
+        : items.slice();
 }
 
 
@@ -791,68 +1089,68 @@ async function mockUploadApplications(file) {
 
 
 function mockBatchPredict() {
-    const applications = mockDb.unscored;
     const now = new Date().toISOString();
 
-    const results = applications.map((application) => {
-        const prediction = makeMockPrediction(application, now);
-        const isDefault = prediction.score > MOCK_THRESHOLD;
+    const predictions = mockDb.unscored.map(
+        (application) => makeMockPrediction(application, now)
+    );
 
-        mockDb.predictions.unshift(prediction);
-
-        return {
-            application_id: application.application_id,
-            features:
-                `loan_amnt=${application.loan_amnt}, `
-                + `purpose=${application.purpose}, `
-                + `fico=${application.fico_range_low}`,
-            "P(default)": prediction.score,
-            class: isDefault ? "DEFAULT" : "NO DEFAULT",
-            decision: isDefault ? "Reject" : "Approve",
-            "main reasons": prediction.feature_importance
-                .map((item) => {
-                    const sign = item.impact >= 0 ? "+" : "";
-                    return `${item.feature} (${sign}${item.impact})`;
-                })
-                .join("; ")
-        };
-    });
-
+    mockDb.predictions.unshift(...predictions);
     mockDb.unscored = [];
 
-    const approved = results.filter(
-        (item) => item.decision === "Approve"
+    const count = (decision) => predictions.filter(
+        (item) => item.decision === decision
     ).length;
 
-    const csv = toCsv(results, [
-        "application_id", "features", "P(default)",
-        "class", "decision", "main reasons"
-    ]);
-
     return {
-        total: results.length,
-        approved,
-        rejected: results.length - approved,
-        filename: "batch_results_mock.csv",
-        download_url: csvToBlobUrl(csv),
-        preview: results.slice(0, 10)
+        total: predictions.length,
+        approved: count("APPROVE"),
+        review: count("REVIEW"),
+        declined: count("DECLINE")
     };
 }
 
 
-function mockFetchPredictions(range) {
-    return { items: filterByDates(mockDb.predictions, range) };
+function mockFetchPredictions(period) {
+    return { items: filterByPeriod(mockDb.predictions, period) };
 }
 
 
-function mockExportPredictions(range) {
-    const items = filterByDates(mockDb.predictions, range);
+function mockExportPredictions(period) {
+    const items = filterByPeriod(mockDb.predictions, period);
 
     const csv = toCsv(items, [
-        ...PREDICTION_COLUMNS, "features", "feature_importance"
+        "application_id", "ts", "decision", "score", "model_version",
+        "latency_ms", "response_code", "features", "feature_importance"
     ]);
 
     return csvToBlobUrl(csv);
+}
+
+
+function mockFetchReview() {
+    // Очередь: самые старые заявки первыми
+    const items = mockDb.predictions
+        .filter((item) => item.decision === "REVIEW")
+        .sort((a, b) => a.ts.localeCompare(b.ts));
+
+    return { items };
+}
+
+
+function mockResolveReview(applicationId, decision) {
+    const item = mockDb.predictions.find(
+        (entry) => entry.application_id === applicationId
+            && entry.decision === "REVIEW"
+    );
+
+    if (!item) {
+        throw new Error("Application is not in review.");
+    }
+
+    item.decision = decision;
+
+    return { application_id: applicationId, decision };
 }
 
 
@@ -866,3 +1164,4 @@ if (USE_MOCK) {
 
 loadUnscored();
 loadPredictions();
+loadReview();

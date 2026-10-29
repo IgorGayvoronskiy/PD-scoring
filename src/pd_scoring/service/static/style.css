@@ -22,9 +22,15 @@ h2 {
     margin-top: 0;
 }
 
+h3 {
+    margin: 0 0 6px;
+    font-size: 16px;
+}
+
 button:focus-visible,
 input:focus-visible,
-a:focus-visible {
+a:focus-visible,
+.review-row:focus-visible {
     outline: 2px solid #1a73e8;
     outline-offset: 2px;
 }
@@ -47,6 +53,11 @@ a:focus-visible {
 
 .tab.active {
     background: #222;
+    color: white;
+}
+
+.tab.active .badge {
+    background: #4a4d52;
     color: white;
 }
 
@@ -115,29 +126,46 @@ a:focus-visible {
     margin-bottom: 0;
 }
 
+/* Периоды на вкладке Predictions */
+
 .filters {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
+    justify-content: space-between;
     gap: 14px;
     flex-wrap: wrap;
 }
 
-.filter {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
+.periods {
+    display: inline-flex;
+    flex-wrap: wrap;
+    border: 1px solid #d0d4da;
+    border-radius: 8px;
+    background: white;
+    overflow: hidden;
 }
 
-.filter label {
+.period {
+    padding: 10px 18px;
+    border: none;
+    border-right: 1px solid #d0d4da;
+    background: white;
+    color: #222;
     font-size: 14px;
-    font-weight: 600;
+    cursor: pointer;
 }
 
-.filter input {
-    padding: 10px 12px;
-    border: 1px solid #ccd0d5;
-    border-radius: 7px;
-    font-size: 15px;
+.period:last-child {
+    border-right: none;
+}
+
+.period:hover {
+    background: #f0f1f3;
+}
+
+.period.active {
+    background: #222;
+    color: white;
 }
 
 .result {
@@ -146,6 +174,10 @@ a:focus-visible {
     background: white;
     border-radius: 10px;
     border: 1px solid #e0e2e5;
+}
+
+.result-first {
+    margin-top: 0;
 }
 
 .section-header {
@@ -161,6 +193,12 @@ a:focus-visible {
     margin: 0;
 }
 
+.header-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
 .badge {
     display: inline-block;
     margin-left: 8px;
@@ -171,30 +209,6 @@ a:focus-visible {
     font-size: 14px;
     font-weight: 400;
     vertical-align: middle;
-}
-
-.result-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 15px;
-    margin-bottom: 30px;
-}
-
-.metric {
-    padding: 18px;
-    background: #f5f6f8;
-    border-radius: 8px;
-}
-
-.metric span {
-    display: block;
-    color: #666;
-    font-size: 13px;
-    margin-bottom: 8px;
-}
-
-.metric strong {
-    font-size: 22px;
 }
 
 table {
@@ -230,13 +244,9 @@ td.empty {
     color: #888;
 }
 
-.table-wrapper {
-    overflow-x: auto;
-}
-
 /* Таблицы с прокруткой по обеим осям и закреплённой шапкой */
 .table-scroll {
-    max-height: 420px;
+    max-height: 520px;
     overflow: auto;
     border: 1px solid #e0e2e5;
     border-radius: 8px;
@@ -258,8 +268,170 @@ td.empty {
     box-shadow: inset 0 -1px 0 #e5e5e5;
 }
 
-.download-box {
-    margin-bottom: 30px;
+/* Решение: DECLINE красный, REVIEW жёлтый, APPROVE зелёный */
+
+td.decision {
+    font-weight: 700;
+}
+
+td.decision-decline {
+    color: #c5221f;
+}
+
+td.decision-review {
+    color: #b06000;
+}
+
+td.decision-approve {
+    color: #137333;
+}
+
+/* Review: раскрывающиеся строки */
+
+.review-row {
+    cursor: pointer;
+}
+
+.review-row:hover {
+    background: #f9fafb;
+}
+
+.review-row[aria-expanded="true"] {
+    background: #f5f6f8;
+}
+
+td.chevron {
+    width: 28px;
+    color: #666;
+}
+
+.detail-row > td {
+    padding: 0;
+    background: #fafafa;
+    white-space: normal;
+}
+
+.detail-panel {
+    padding: 18px 22px 22px;
+}
+
+.importance {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 760px;
+    margin-bottom: 20px;
+}
+
+.importance-row {
+    display: grid;
+    grid-template-columns: 190px 130px 1fr 70px;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+}
+
+.importance-name {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.importance-value {
+    color: #555;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.importance-impact {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.bar-track {
+    position: relative;
+    height: 16px;
+    background: #eceef1;
+    border-radius: 4px;
+}
+
+/* Нулевая линия по центру */
+.bar-track::after {
+    content: "";
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    left: 50%;
+    width: 1px;
+    background: #888;
+}
+
+.bar-fill {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+}
+
+.bar-fill.positive {
+    left: 50%;
+    background: #d93025;
+    border-radius: 0 4px 4px 0;
+}
+
+.bar-fill.negative {
+    right: 50%;
+    background: #1e8e3e;
+    border-radius: 4px 0 0 4px;
+}
+
+/* Переключатель решения */
+
+.review-actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+
+.review-actions-label {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.toggle {
+    display: inline-flex;
+    border: 1px solid #d0d4da;
+    border-radius: 8px;
+    overflow: hidden;
+    background: white;
+}
+
+.toggle-option {
+    padding: 10px 22px;
+    border: none;
+    background: white;
+    color: #222;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.toggle-option + .toggle-option {
+    border-left: 1px solid #d0d4da;
+}
+
+.toggle-option:hover {
+    background: #f0f1f3;
+}
+
+.toggle-option.toggle-approve.active {
+    background: #1e8e3e;
+    color: white;
+}
+
+.toggle-option.toggle-decline.active {
+    background: #d93025;
+    color: white;
 }
 
 .error {
@@ -306,15 +478,14 @@ td.empty {
     }
 }
 
-@media (max-width: 800px) {
-    .result-grid {
+@media (max-width: 700px) {
+    .importance-row {
         grid-template-columns: 1fr 1fr;
     }
-}
 
-@media (max-width: 500px) {
-    .result-grid {
-        grid-template-columns: 1fr;
+    .importance-row .bar-track {
+        grid-column: 1 / -1;
+        order: 3;
     }
 }
 

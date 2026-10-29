@@ -1,4 +1,5 @@
 import os
+import uuid
 
 import pytest
 
@@ -22,6 +23,15 @@ def test_index_page(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "PD Scoring" in r.text
+
+
+def test_index_page_has_tabs_without_batch(client):
+    text = client.get("/").text
+
+    assert 'data-tab="applications"' in text
+    assert 'data-tab="predictions"' in text
+    assert 'data-tab="review"' in text
+    assert 'data-tab="batch"' not in text
 
 
 def test_bad_dti_is_422(client, good_row):
@@ -74,9 +84,9 @@ def test_predict_response(client, good_row):
 
     assert isinstance(data["request_id"], str)
     assert isinstance(data["score"], float)
-    assert isinstance(data["threshold"], float)
-    assert isinstance(data["default"], bool)
-    assert data["decision"] in {"APPROVE", "REJECT"}
+    assert isinstance(data["t_low"], float)
+    assert isinstance(data["t_high"], float)
+    assert data["decision"] in {"APPROVE", "REVIEW", "DECLINE"}
     assert isinstance(data["explanations"], list)
     assert len(data["explanations"]) <= 5
     assert isinstance(data["model_version"], str)
@@ -119,6 +129,29 @@ def test_explicit_nulls_in_optional_fields_are_valid(client, good_row):
     assert 0.0 <= r.json()["score"] <= 1.0
 
 
+# Эти проверки срабатывают до обращения к БД, поэтому БД не нужна
+
+@pytest.mark.parametrize("url", ["/v1/predictions", "/v1/predictions/export"])
+@pytest.mark.parametrize("period", ["tomorrow", "", "2026-01-01"])
+def test_bad_period_is_422(client, url, period):
+    assert client.get(url, params={"period": period}).status_code == 422
+
+
+@pytest.mark.parametrize("decision", ["REVIEW", "approve", "", "REJECT"])
+def test_review_decision_must_be_approve_or_decline(client, decision):
+    r = client.post(
+        f"/v1/review/{uuid.uuid4()}/decision", json={"decision": decision}
+    )
+
+    assert r.status_code == 422
+
+
+def test_review_decision_requires_uuid(client):
+    r = client.post("/v1/review/not-a-uuid/decision", json={"decision": "APPROVE"})
+
+    assert r.status_code == 422
+
+
 @pytest.mark.skipif(bool(os.getenv("DATABASE_URL")), reason="база настроена")
 @pytest.mark.parametrize(
     ("method", "url"),
@@ -126,8 +159,19 @@ def test_explicit_nulls_in_optional_fields_are_valid(client, good_row):
         ("get", "/v1/applications/unscored"),
         ("post", "/v1/predict/batch"),
         ("get", "/v1/predictions"),
+        ("get", "/v1/predictions?period=week"),
         ("get", "/v1/predictions/export"),
+        ("get", "/v1/review"),
     ],
 )
 def test_db_endpoints_without_database_are_503(client, method, url):
     assert getattr(client, method)(url).status_code == 503
+
+
+@pytest.mark.skipif(bool(os.getenv("DATABASE_URL")), reason="база настроена")
+def test_review_decision_without_database_is_503(client):
+    r = client.post(
+        f"/v1/review/{uuid.uuid4()}/decision", json={"decision": "APPROVE"}
+    )
+
+    assert r.status_code == 503

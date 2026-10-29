@@ -1,6 +1,6 @@
 import math
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 from psycopg.rows import dict_row
@@ -56,6 +56,19 @@ NULLABLE_COLUMNS = {
 }
 assert NULLABLE_COLUMNS <= set(APPLICATION_COLUMNS)
 
+# Решение по заявке:
+#   score < T_low             -> APPROVE
+#   T_low <= score < T_high   -> REVIEW
+#   score >= T_high           -> DECLINE
+# Пороги применяет app.py; здесь хранится только результат.
+DECISIONS = ("APPROVE", "REVIEW", "DECLINE")
+
+# Решения, которые можно принять вручную по заявке из REVIEW
+REVIEW_OUTCOMES = ("APPROVE", "DECLINE")
+
+# Периоды для просмотра и выгрузки predictions (границы по UTC)
+PERIODS = ("today", "week", "month", "year", "all")
+
 
 def _column_ddl(col: str) -> str:
     if col in DATE_COLUMNS:
@@ -69,6 +82,7 @@ def _column_ddl(col: str) -> str:
 
 
 _APPLICATION_FEATURES_DDL = ",\n".join(_column_ddl(c) for c in APPLICATION_COLUMNS)
+_DECISION_CHECK = "decision IN ('APPROVE', 'REVIEW', 'DECLINE')"
 
 DDL = f"""
 CREATE TABLE IF NOT EXISTS applications (
@@ -87,11 +101,32 @@ CREATE TABLE IF NOT EXISTS predictions (
     model_version       text NOT NULL,
     features            jsonb NOT NULL,
     score               double precision,
+    decision            text NOT NULL CHECK ({_DECISION_CHECK}),
+    reviewed_at         timestamptz,
     latency_ms          real,
     response_code       integer NOT NULL,
     feature_importance  jsonb
 );
 """
+
+# Для уже существующей таблицы predictions (создана без decision).
+# Старые строки остаются с decision = NULL: порогов T_low / T_high на момент
+# их скоринга нет, поэтому в REVIEW они не попадают.
+MIGRATION = f"""
+ALTER TABLE predictions
+    ADD COLUMN IF NOT EXISTS decision text CHECK ({_DECISION_CHECK});
+ALTER TABLE predictions
+    ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
+"""
+
+INDEXES = """
+CREATE INDEX IF NOT EXISTS predictions_ts_idx
+    ON predictions (ts DESC);
+
+CREATE INDEX IF NOT EXISTS predictions_review_idx
+    ON predictions (ts) WHERE decision = 'REVIEW';
+"""
+
 
 def init() -> None:
     if not settings.database_url:
@@ -99,6 +134,8 @@ def init() -> None:
     with psycopg.connect(settings.database_url) as conn:
         conn.execute("SELECT pg_advisory_xact_lock(7001)")
         conn.execute(DDL)
+        conn.execute(MIGRATION)
+        conn.execute(INDEXES)
 
 
 def _clean(value):
@@ -193,38 +230,50 @@ def mark_scored(application_ids: list[str]) -> int:
         return cur.rowcount
 
 
+def _check_decision(decision: str) -> None:
+    if decision not in DECISIONS:
+        raise ValueError(f"decision must be one of {DECISIONS}, got {decision!r}")
+
+
+_INSERT_PREDICTION = """
+    INSERT INTO predictions (
+        application_id,
+        model_version,
+        features,
+        score,
+        decision,
+        latency_ms,
+        response_code,
+        feature_importance
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+
 def save_prediction(
     application_id: str,
     features: dict,
     score: float | None,
+    decision: str,
     model_version: str,
     latency_ms: float,
     response_code: int,
     feature_importance: list[dict] | None = None,
 ) -> None:
-    """application_id должен совпадать с application_id существующей заявки."""
+    """application_id должен совпадать с application_id существующей заявки.
+    decision: APPROVE, REVIEW или DECLINE."""
     if not settings.database_url:
         return
-    query = """
-        INSERT INTO predictions (
-            application_id,
-            model_version,
-            features,
-            score,
-            latency_ms,
-            response_code,
-            feature_importance
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """
+    _check_decision(decision)
     with psycopg.connect(settings.database_url) as conn:
         conn.execute(
-            query,
+            _INSERT_PREDICTION,
             (
                 application_id,
                 model_version,
                 Json(features),
                 score,
+                decision,
                 latency_ms,
                 response_code,
                 Json(feature_importance) if feature_importance is not None else None,
@@ -237,24 +286,13 @@ def save_predictions(records: list[dict]) -> None:
     scored = true у соответствующих заявок: либо записываются и предсказания,
     и флаги, либо ничего.
 
-    Каждая запись: application_id, features, score, model_version,
+    Каждая запись: application_id, features, score, decision, model_version,
     latency_ms, response_code, feature_importance (необязательно)."""
     if not settings.database_url or not records:
         return
-    query = """
-        INSERT INTO predictions (
-            application_id,
-            model_version,
-            features,
-            score,
-            latency_ms,
-            response_code,
-            feature_importance
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """
     params = []
     for record in records:
+        _check_decision(record["decision"])
         importance = record.get("feature_importance")
         params.append(
             (
@@ -262,6 +300,7 @@ def save_predictions(records: list[dict]) -> None:
                 record["model_version"],
                 Json(record["features"]),
                 record["score"],
+                record["decision"],
                 record["latency_ms"],
                 record["response_code"],
                 Json(importance) if importance is not None else None,
@@ -271,40 +310,62 @@ def save_predictions(records: list[dict]) -> None:
 
     with psycopg.connect(settings.database_url) as conn:
         with conn.cursor() as cur:
-            cur.executemany(query, params)
+            cur.executemany(_INSERT_PREDICTION, params)
             cur.execute(
                 "UPDATE applications SET scored = true WHERE application_id = ANY(%s)",
                 (ids,),
             )
 
 
+def period_start(period: str | None) -> datetime | None:
+    """Начало периода по UTC. None и 'all' означают весь период.
+    today: с начала текущих суток UTC; week, month, year: последние
+    7, 30 и 365 суток от текущего момента."""
+    if period is None or period == "all":
+        return None
+    now = datetime.now(UTC)
+    if period == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    days = {"week": 7, "month": 30, "year": 365}.get(period)
+    if days is None:
+        raise ValueError(f"period must be one of {PERIODS}, got {period!r}")
+    return now - timedelta(days=days)
+
+
 def fetch_predictions(
-    date_from: date | None = None,
-    date_to: date | None = None,
+    period: str | None = None,
     limit: int | None = None,
     details: bool = False,
+    summary_keys: list[str] | None = None,
 ) -> list[dict]:
-    """Возвращает предсказания, самые новые первыми. Границы date_from и
-    date_to включаются и считаются по UTC. details=True добавляет столбцы
-    features и feature_importance."""
+    """Возвращает предсказания за период, самые новые первыми.
+
+    period: today, week, month, year или all (см. period_start).
+    details=True добавляет полные features и feature_importance (для экспорта).
+    summary_keys: если details=False, в features попадают только эти ключи
+    (например SUMMARY_COLUMNS из app.py), чтобы не гонять все 64 признака."""
     if not settings.database_url:
         return []
-    columns = "application_id, ts, model_version, score, latency_ms, response_code"
+    columns = (
+        "application_id, ts, model_version, score, decision, "
+        "latency_ms, response_code"
+    )
+
+    params: list = []
     if details:
         columns += ", features, feature_importance"
-
-    conditions = []
-    params: list = []
-    if date_from is not None:
-        conditions.append("ts >= (%s::date)::timestamp AT TIME ZONE 'UTC'")
-        params.append(date_from)
-    if date_to is not None:
-        conditions.append("ts < ((%s::date) + 1)::timestamp AT TIME ZONE 'UTC'")
-        params.append(date_to)
+    elif summary_keys:
+        columns += (
+            ", (SELECT COALESCE(jsonb_object_agg(e.key, e.value), '{}'::jsonb) "
+            "FROM jsonb_each(features) AS e WHERE e.key = ANY(%s)) AS features"
+        )
+        params.append(list(summary_keys))
 
     query = f"SELECT {columns} FROM predictions"
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
+    start = period_start(period)
+    if start is not None:
+        query += " WHERE ts >= %s"
+        params.append(start)
     query += " ORDER BY ts DESC, application_id"
     if limit is not None:
         query += " LIMIT %s"
@@ -315,3 +376,44 @@ def fetch_predictions(
     for row in rows:
         row["application_id"] = str(row["application_id"])
     return rows
+
+
+def fetch_review(limit: int | None = None) -> list[dict]:
+    """Возвращает заявки с decision = REVIEW, самые старые первыми (очередь).
+    Включает feature_importance для раскрытия строки в интерфейсе."""
+    if not settings.database_url:
+        return []
+    query = (
+        "SELECT application_id, ts, model_version, score, decision, "
+        "feature_importance FROM predictions "
+        "WHERE decision = 'REVIEW' ORDER BY ts, application_id"
+    )
+    params: tuple = ()
+    if limit is not None:
+        query += " LIMIT %s"
+        params = (limit,)
+
+    with psycopg.connect(settings.database_url, row_factory=dict_row) as conn:
+        rows = conn.execute(query, params).fetchall()
+    for row in rows:
+        row["application_id"] = str(row["application_id"])
+    return rows
+
+
+def resolve_review(application_id: str, decision: str) -> bool:
+    """Переносит заявку из REVIEW в APPROVE или DECLINE и ставит reviewed_at.
+    Возвращает False, если заявки нет или она уже не в REVIEW
+    (например, её обработали параллельно)."""
+    if decision not in REVIEW_OUTCOMES:
+        raise ValueError(
+            f"decision must be one of {REVIEW_OUTCOMES}, got {decision!r}"
+        )
+    if not settings.database_url:
+        return False
+    with psycopg.connect(settings.database_url) as conn:
+        cur = conn.execute(
+            "UPDATE predictions SET decision = %s, reviewed_at = now() "
+            "WHERE application_id = %s AND decision = 'REVIEW'",
+            (decision, uuid.UUID(str(application_id))),
+        )
+        return cur.rowcount == 1

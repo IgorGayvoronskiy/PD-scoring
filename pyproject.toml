@@ -1,6 +1,6 @@
 [project]
 name = "pd-scoring-service"
-version = "0.2.5"
+version = "0.3.0"
 description = "PD-scoring service"
 requires-python=">=3.11,<3.12"
 
@@ -17,6 +17,7 @@ dependencies = [
     "shap",
     "python-multipart",
     "jinja2>=3.1.6",
+    "mlflow-skinny==3.17.1",
 ]
 
 [dependency-groups]

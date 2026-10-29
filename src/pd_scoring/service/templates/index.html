@@ -30,16 +30,20 @@
 
         <button
             class="tab"
-            data-tab="batch"
+            data-tab="predictions"
         >
-            Batch scoring
+            Predictions
         </button>
 
         <button
             class="tab"
-            data-tab="predictions"
+            data-tab="review"
         >
-            Predictions
+            Review
+            <span
+                id="review-tab-count"
+                class="badge"
+            >0</span>
         </button>
     </div>
 
@@ -74,7 +78,7 @@
 
             <button
                 type="submit"
-                class="primary-button"
+                class="secondary-button"
                 id="upload-submit"
             >
                 Add to applications
@@ -86,7 +90,6 @@
             <div class="spinner"></div>
             <span>Adding applications...</span>
         </div>
-
 
         <div
             id="upload-error"
@@ -111,15 +114,46 @@
                     >0</span>
                 </h2>
 
-                <button
-                    type="button"
-                    class="secondary-button"
-                    id="unscored-submit"
-                >
-                    Refresh
-                </button>
+                <div class="header-actions">
+
+                    <button
+                        type="button"
+                        class="secondary-button"
+                        id="unscored-submit"
+                    >
+                        Refresh
+                    </button>
+
+                    <button
+                        type="button"
+                        class="primary-button"
+                        id="predict-submit"
+                    >
+                        Run prediction
+                    </button>
+
+                </div>
 
             </div>
+
+            <p class="hint">
+                Scores all applications that have not been scored yet.
+            </p>
+
+            <div id="predict-loader" class="loader hidden">
+                <div class="spinner"></div>
+                <span>Model is working...</span>
+            </div>
+
+            <div
+                id="predict-error"
+                class="error hidden"
+            ></div>
+
+            <div
+                id="predict-success"
+                class="success hidden"
+            ></div>
 
             <div id="unscored-loader" class="loader hidden">
                 <div class="spinner"></div>
@@ -148,127 +182,6 @@
     </section>
 
 
-    <!-- BATCH -->
-
-    <section
-        id="batch"
-        class="tab-content"
-    >
-
-        <form id="batch-form">
-
-            <p class="hint">
-                Scores all applications that have not been scored yet.
-            </p>
-
-            <button
-                type="submit"
-                class="primary-button"
-                id="batch-submit"
-            >
-                Run batch scoring
-            </button>
-
-        </form>
-
-        <div id="batch-loader" class="loader hidden">
-            <div class="spinner"></div>
-            <span>Model is working...</span>
-        </div>
-
-
-        <div
-            id="batch-error"
-            class="error hidden"
-        ></div>
-
-
-        <section
-            id="batch-result"
-            class="result hidden"
-        >
-
-            <h2>Batch results</h2>
-
-            <div class="result-grid">
-
-                <div class="metric">
-                    <span>
-                        Applications
-                    </span>
-
-                    <strong id="batch-total">
-                        -
-                    </strong>
-                </div>
-
-                <div class="metric">
-                    <span>
-                        Approved
-                    </span>
-
-                    <strong id="batch-approved">
-                        -
-                    </strong>
-                </div>
-
-                <div class="metric">
-                    <span>
-                        Rejected
-                    </span>
-
-                    <strong id="batch-rejected">
-                        -
-                    </strong>
-                </div>
-
-            </div>
-
-
-            <div class="download-box">
-
-                <a
-                    id="download-link"
-                    class="primary-button"
-                    href="#"
-                    download
-                >
-                    Download results CSV
-                </a>
-
-            </div>
-
-
-            <h3>First 10 applications</h3>
-
-            <div class="table-wrapper">
-
-                <table>
-
-                    <thead>
-                    <tr>
-                        <th>Application ID</th>
-                        <th>Features</th>
-                        <th>P(default)</th>
-                        <th>Class</th>
-                        <th>Decision</th>
-                        <th>Main reasons</th>
-                    </tr>
-                    </thead>
-
-                    <tbody
-                        id="batch-body"
-                    ></tbody>
-
-                </table>
-
-            </div>
-
-        </section>
-
-    </section>
-
-
     <!-- PREDICTIONS -->
 
     <section
@@ -276,61 +189,74 @@
         class="tab-content"
     >
 
-        <form id="pred-form">
+        <div class="filters">
 
-            <div class="filters">
-
-                <div class="filter">
-                    <label for="date-from">From</label>
-                    <input
-                        id="date-from"
-                        type="date"
-                    >
-                </div>
-
-                <div class="filter">
-                    <label for="date-to">To</label>
-                    <input
-                        id="date-to"
-                        type="date"
-                    >
-                </div>
-
+            <div
+                id="period-buttons"
+                class="periods"
+                role="group"
+                aria-label="Period"
+            >
                 <button
-                    type="submit"
-                    class="secondary-button"
-                    id="pred-submit"
+                    type="button"
+                    class="period"
+                    data-period="today"
                 >
-                    Show
+                    Today
                 </button>
 
                 <button
                     type="button"
-                    class="primary-button"
-                    id="pred-download"
+                    class="period active"
+                    data-period="week"
                 >
-                    Download CSV
+                    Last 7 days
                 </button>
 
+                <button
+                    type="button"
+                    class="period"
+                    data-period="month"
+                >
+                    Last 30 days
+                </button>
+
+                <button
+                    type="button"
+                    class="period"
+                    data-period="year"
+                >
+                    Last year
+                </button>
+
+                <button
+                    type="button"
+                    class="period"
+                    data-period="all"
+                >
+                    All time
+                </button>
             </div>
 
-            <p class="hint">
-                Both dates are included. Leave a field empty for no limit.
-            </p>
+            <button
+                type="button"
+                class="primary-button"
+                id="pred-download"
+            >
+                Download CSV
+            </button>
 
-        </form>
+        </div>
 
         <div id="pred-loader" class="loader hidden">
             <div class="spinner"></div>
             <span>Loading predictions...</span>
         </div>
 
-
         <div
             id="pred-error"
             class="error hidden"
         ></div>
-
 
         <section class="result">
 
@@ -353,6 +279,72 @@
                     <thead id="pred-head"></thead>
 
                     <tbody id="pred-body"></tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+    </section>
+
+
+    <!-- REVIEW -->
+
+    <section
+        id="review"
+        class="tab-content"
+    >
+
+        <section class="result result-first">
+
+            <div class="section-header">
+
+                <h2>
+                    Applications for review
+                    <span
+                        id="review-count"
+                        class="badge"
+                    >0</span>
+                </h2>
+
+                <button
+                    type="button"
+                    class="secondary-button"
+                    id="review-submit"
+                >
+                    Refresh
+                </button>
+
+            </div>
+
+            <p class="hint">
+                Click an application to see the main reasons of the model,
+                then move it to APPROVE or DECLINE.
+            </p>
+
+            <div id="review-loader" class="loader hidden">
+                <div class="spinner"></div>
+                <span>Loading applications...</span>
+            </div>
+
+            <div
+                id="review-error"
+                class="error hidden"
+            ></div>
+
+            <div
+                id="review-success"
+                class="success hidden"
+            ></div>
+
+            <div class="table-scroll">
+
+                <table>
+
+                    <thead id="review-head"></thead>
+
+                    <tbody id="review-body"></tbody>
 
                 </table>
 
