@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+    <title>PD Scoring</title>
+
+    <link
+        rel="stylesheet"
+        href="/static/style.css"
+    >
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>PD Scoring</h1>
+
+    <div class="tabs">
+        <button
+            class="tab active"
+            data-tab="applications"
+        >
+            Applications
+        </button>
+
+        <button
+            class="tab"
+            data-tab="predictions"
+        >
+            Predictions
+        </button>
+
+        <button
+            class="tab"
+            data-tab="review"
+        >
+            Review
+            <span
+                id="review-tab-count"
+                class="badge"
+            >0</span>
+        </button>
+    </div>
+
+
+    <!-- APPLICATIONS -->
+
+    <section
+        id="applications"
+        class="tab-content active"
+    >
+
+        <form id="upload-form">
+
+            <div class="upload-box">
+
+                <label for="csv-file">
+                    CSV file with applications
+                </label>
+
+                <input
+                    id="csv-file"
+                    type="file"
+                    accept=".csv"
+                    required
+                >
+
+                <p class="hint">
+                    One row per application. Empty cells are saved as missing values.
+                </p>
+
+            </div>
+
+            <button
+                type="submit"
+                class="secondary-button"
+                id="upload-submit"
+            >
+                Add to applications
+            </button>
+
+        </form>
+
+        <div id="upload-loader" class="loader hidden">
+            <div class="spinner"></div>
+            <span>Adding applications...</span>
+        </div>
+
+        <div
+            id="upload-error"
+            class="error hidden"
+        ></div>
+
+        <div
+            id="upload-success"
+            class="success hidden"
+        ></div>
+
+
+        <section class="result">
+
+            <div class="section-header">
+
+                <h2>
+                    Unscored applications
+                    <span
+                        id="unscored-count"
+                        class="badge"
+                    >0</span>
+                </h2>
+
+                <div class="header-actions">
+
+                    <button
+                        type="button"
+                        class="secondary-button"
+                        id="unscored-submit"
+                    >
+                        Refresh
+                    </button>
+
+                    <button
+                        type="button"
+                        class="primary-button"
+                        id="predict-submit"
+                    >
+                        Run prediction
+                    </button>
+
+                </div>
+
+            </div>
+
+            <p class="hint">
+                Scores all applications that have not been scored yet.
+            </p>
+
+            <div id="predict-loader" class="loader hidden">
+                <div class="spinner"></div>
+                <span>Model is working...</span>
+            </div>
+
+            <div
+                id="predict-error"
+                class="error hidden"
+            ></div>
+
+            <div
+                id="predict-success"
+                class="success hidden"
+            ></div>
+
+            <div id="unscored-loader" class="loader hidden">
+                <div class="spinner"></div>
+                <span>Loading applications...</span>
+            </div>
+
+            <div
+                id="unscored-error"
+                class="error hidden"
+            ></div>
+
+            <div class="table-scroll">
+
+                <table>
+
+                    <thead id="unscored-head"></thead>
+
+                    <tbody id="unscored-body"></tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+    </section>
+
+
+    <!-- PREDICTIONS -->
+
+    <section
+        id="predictions"
+        class="tab-content"
+    >
+
+        <div class="filters">
+
+            <div
+                id="period-buttons"
+                class="periods"
+                role="group"
+                aria-label="Period"
+            >
+                <button
+                    type="button"
+                    class="period"
+                    data-period="today"
+                >
+                    Today
+                </button>
+
+                <button
+                    type="button"
+                    class="period active"
+                    data-period="week"
+                >
+                    Last 7 days
+                </button>
+
+                <button
+                    type="button"
+                    class="period"
+                    data-period="month"
+                >
+                    Last 30 days
+                </button>
+
+                <button
+                    type="button"
+                    class="period"
+                    data-period="year"
+                >
+                    Last year
+                </button>
+
+                <button
+                    type="button"
+                    class="period"
+                    data-period="all"
+                >
+                    All time
+                </button>
+            </div>
+
+            <button
+                type="button"
+                class="primary-button"
+                id="pred-download"
+            >
+                Download CSV
+            </button>
+
+        </div>
+
+        <div id="pred-loader" class="loader hidden">
+            <div class="spinner"></div>
+            <span>Loading predictions...</span>
+        </div>
+
+        <div
+            id="pred-error"
+            class="error hidden"
+        ></div>
+
+        <section class="result">
+
+            <div class="section-header">
+
+                <h2>
+                    Predictions
+                    <span
+                        id="pred-count"
+                        class="badge"
+                    >0</span>
+                </h2>
+
+            </div>
+
+            <div class="table-scroll">
+
+                <table>
+
+                    <thead id="pred-head"></thead>
+
+                    <tbody id="pred-body"></tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+    </section>
+
+
+    <!-- REVIEW -->
+
+    <section
+        id="review"
+        class="tab-content"
+    >
+
+        <section class="result result-first">
+
+            <div class="section-header">
+
+                <h2>
+                    Applications for review
+                    <span
+                        id="review-count"
+                        class="badge"
+                    >0</span>
+                </h2>
+
+                <button
+                    type="button"
+                    class="secondary-button"
+                    id="review-submit"
+                >
+                    Refresh
+                </button>
+
+            </div>
+
+            <p class="hint">
+                Click an application to see the main reasons of the model,
+                then move it to APPROVE or DECLINE.
+            </p>
+
+            <div id="review-loader" class="loader hidden">
+                <div class="spinner"></div>
+                <span>Loading applications...</span>
+            </div>
+
+            <div
+                id="review-error"
+                class="error hidden"
+            ></div>
+
+            <div
+                id="review-success"
+                class="success hidden"
+            ></div>
+
+            <div class="table-scroll">
+
+                <table>
+
+                    <thead id="review-head"></thead>
+
+                    <tbody id="review-body"></tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+    </section>
+
+</div>
+
+
+<script src="/static/app.js"></script>
+
+</body>
+</html>

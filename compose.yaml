@@ -1,0 +1,53 @@
+name: pd-scoring
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pd}
+      POSTGRES_DB: ${POSTGRES_DB:-pd}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  service:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pd}:${POSTGRES_PASSWORD:-pd}@db:5432/${POSTGRES_DB:-pd}
+      MLFLOW_TRACKING_URI: http://mlflow-server:5000
+      MODEL_NAME: pd_scoring
+      MODEL_ALIAS: champion
+      LOG_LEVEL: INFO
+    networks:
+      default: {}
+      mlflow-network: {}
+      web:
+        aliases:
+          - pd-ui
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+networks:
+  mlflow-network:
+    external: true
+    name: mlflow-network
+  web:
+    external: true
+    name: web
+
+volumes:
+  pgdata:
